@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frequency</title>
+<meta name="description" content="Your listening, measured — and what to play next.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300..800&family=Caveat:wght@500;700&family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<!-- Shared SVG defs: the hand-drawn wobble every illustration and doodle runs through -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <filter id="wobble"><feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves="2" seed="4"/><feDisplacementMap in="SourceGraphic" scale="2.6"/></filter>
+    <filter id="wobble-strong"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="9"/><feDisplacementMap in="SourceGraphic" scale="5"/></filter>
+  </defs>
+</svg>
+
+<header class="masthead" id="top">
+  <a class="wordmark" href="#top" aria-label="Frequency, back to top"><span>Frequency</span><em>est. by your ears</em></a>
+  <nav aria-label="Sections">
+    <a href="#crate"><i>01</i>Next</a>
+    <a href="#desk"><i>02</i>Desk</a>
+    <a href="#worlds"><i>03</i>Worlds</a>
+    <a href="#fingerprint"><i>04</i>Fingerprint</a>
+    <a href="#notes"><i>05</i>Notes</a>
+  </nav>
+  <p class="issue" id="issue">—</p>
+</header>
+
+<main>
+  <section class="hero" id="hero" aria-label="Your top recommendation">
+    <div class="hero-ambient" aria-hidden="true"></div>
+    <div class="hero-halftone" aria-hidden="true"></div>
+    <div class="hero-inner" id="hero-inner"><div class="loading-line">pressing your records…</div></div>
+  </section>
+
+  <section class="desk reveal" id="desk" aria-labelledby="desk-title">
+    <div class="desk-head">
+      <h2 id="desk-title"><span class="outline">Tune</span> <em>the</em> dig</h2>
+      <p class="hand">turn a dial, the crate reshuffles <svg class="doodle-arrow" viewBox="0 0 90 40" aria-hidden="true"><path d="M2 30 C 25 6, 55 4, 82 18 M70 8 L84 18 L70 26" /></svg></p>
+    </div>
+    <form class="panel" id="panel" onsubmit="return false">
+      <span class="screw s1"></span><span class="screw s2"></span><span class="screw s3"></span><span class="screw s4"></span>
+      <fieldset class="faders">
+        <legend>Mix</legend>
+        <label class="fader"><span class="cap">Sound</span><input type="range" min="0" max="100" step="5" data-w="ws" aria-label="Sound match weight"><output data-o="ws">50</output></label>
+        <label class="fader"><span class="cap">Scene</span><input type="range" min="0" max="100" step="5" data-w="wc" aria-label="Scene match weight"><output data-o="wc">25</output></label>
+        <label class="fader"><span class="cap">Connection</span><input type="range" min="0" max="100" step="5" data-w="wn" aria-label="Connection weight"><output data-o="wn">25</output></label>
+      </fieldset>
+      <fieldset class="switches">
+        <legend>Reach</legend>
+        <label class="switch"><input type="checkbox" id="opt-known"><span class="track"><span class="knob"></span></span><span class="sw-text"><b>Familiar artists</b><small>unheard songs from artists you already play</small></span></label>
+        <label class="switch"><input type="checkbox" id="opt-far"><span class="track"><span class="knob"></span></span><span class="sw-text"><b>Two steps out</b><small>artists related to your related artists</small></span></label>
+      </fieldset>
+      <fieldset class="rails">
+        <legend>Filter</legend>
+        <div class="rail" data-rail="bpm"><span class="cap">BPM</span>
+          <div class="dual"><input type="range" data-end="lo" aria-label="Minimum BPM"><input type="range" data-end="hi" aria-label="Maximum BPM"><span class="fill"></span></div>
+          <output class="led" data-led="bpm">—</output></div>
+        <div class="rail" data-rail="bass"><span class="cap">Bass</span>
+          <div class="dual"><input type="range" data-end="lo" aria-label="Minimum bass"><input type="range" data-end="hi" aria-label="Maximum bass"><span class="fill"></span></div>
+          <output class="led" data-led="bass">—</output></div>
+      </fieldset>
+      <div class="status"><span class="lamp" id="lamp"></span><span id="status-text">live</span><button type="button" class="reset" id="reset">reset</button></div>
+    </form>
+  </section>
+
+  <section class="crate" id="crate" aria-labelledby="crate-title">
+    <header class="crate-head reveal">
+      <h2 id="crate-title"><em>the</em><span class="outline">Crate</span></h2>
+      <p class="crate-count mono" id="crate-count">—</p>
+    </header>
+    <div id="crate-body"></div>
+  </section>
+
+  <section class="worlds" id="worlds" aria-labelledby="worlds-title">
+    <header class="worlds-head reveal">
+      <h2 id="worlds-title">Your <em>worlds</em></h2>
+      <p class="lede" id="worlds-lede">—</p>
+    </header>
+    <div id="worlds-body"></div>
+  </section>
+
+  <section class="fingerprint" id="fingerprint" aria-labelledby="fp-title">
+    <header class="fp-head reveal">
+      <h2 id="fp-title"><span class="outline">Sound</span><br><em>fingerprint</em></h2>
+      <p class="lede">Every song you play, folded into one shape. No two listeners draw the same one.</p>
+    </header>
+    <div class="fp-grid">
+      <figure class="fp-print reveal" id="fp-print"></figure>
+      <figure class="fp-terrain reveal" id="fp-terrain"></figure>
+      <figure class="fp-orbit reveal" id="fp-orbit"></figure>
+      <figure class="fp-stars reveal" id="fp-stars"></figure>
+    </div>
+    <details class="as-text reveal" id="fp-text"><summary>Read the fingerprint as text</summary><div></div></details>
+  </section>
+
+  <section class="notes reveal" id="notes" aria-labelledby="notes-title">
+    <h2 id="notes-title">Liner <em>notes</em></h2>
+    <div class="notes-grid" id="notes-body"></div>
+    <div class="notes-character" id="notes-character" aria-hidden="true"></div>
+  </section>
+</main>
+
+<footer class="colophon">
+  <span>Frequency</span><span class="mono">pressed locally at 127.0.0.1 · nothing leaves this machine</span><a href="#top" class="mono">back to the top ↑</a>
+</footer>
+
+<div class="tooltip" id="tooltip" role="status" aria-live="polite"></div>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
