@@ -10,9 +10,11 @@ Spotify is the exception: it goes through spotify_auth (spotipy), one call at a 
 """
 import json
 import random
+import re
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
+from urllib.parse import urlparse
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
 import requests
@@ -22,18 +24,23 @@ from config import CACHE
 
 UA = "PersonalMusicTaste/0.2 (personal listening-analysis project)"
 
-# rate = steady requests/second (None = no limit), concurrency = max in flight.
-# Deezer documents ~50 requests / 5 s; MusicBrainz asks for 1/s; iTunes ~20/min; ReccoBeats is
-# undocumented, so it starts modest and backs off on 429s. CDNs serve files, not API quota.
+# rate = steady requests/second (None = no limit), concurrency = max in flight,
+# window = (max requests, seconds): at most that many request starts in any rolling span of that length.
+# Deezer documents ~50 requests / 5 s; MusicBrainz asks for 1/s; iTunes ~20/min. CDNs serve files, not API quota.
 SERVICES = {
     "deezer":      {"rate": 9.0,  "concurrency": 8, "timeout": 20},
     "deezer_cdn":  {"rate": None, "concurrency": 8, "timeout": 60},
     "itunes":      {"rate": 0.33, "concurrency": 1, "timeout": 20},
     "itunes_cdn":  {"rate": None, "concurrency": 6, "timeout": 60},
     "reccobeats":  {"rate": 4.0,  "concurrency": 4, "timeout": 60},     # batch lookups
-    # Clip analysis: ReccoBeats caps it server-side at ~0.55/s (measured: 0.55-0.56/s whether we send
-    # 2 or 3 at once). Pacing to that cap gives the same throughput without a wall of 429s.
-    "reccobeats_upload": {"rate": 0.55, "concurrency": 2, "timeout": 180},
+    # Clip analysis: measured Oct 9 2026 as a fixed window of 15 requests per 30 s (15 succeed back to
+    # back, the 16th gets 429 with Retry-After = time to the window's end). A rolling 15-per-31 s limit can
+    # never exceed any 30 s window, so it uses the full allowance with zero rejections.
+    # Measured again Oct 9: the windows are on a fixed clock (reset ~10 s past each 30 s mark of Unix time,
+    # stable across bursts and not anchored to our requests), and Retry-After is rounded down. So requests
+    # are lined up with that clock: 15 just after each reset, every 30 s exactly - the full permitted rate.
+    "reccobeats_upload": {"rate": None, "concurrency": 2, "timeout": 180, "window": (15, 30.0),
+                          "aligned": {"phase": 10.0, "after_reset": 0.5, "end_guard": 2.0}},
     "musicbrainz": {"rate": 0.9,  "concurrency": 1, "timeout": 30},
     "images":      {"rate": None, "concurrency": 8, "timeout": 20},
 }
@@ -49,9 +56,17 @@ class ServicePaused(Exception):
 
 
 class _Service:
-    def __init__(self, name, rate, concurrency, timeout):
+    def __init__(self, name, rate, concurrency, timeout, window=None, aligned=None):
         self.name, self.timeout = name, timeout
         self.interval = 1 / rate if rate else 0.0
+        self.window = window
+        self.base_span = window[1] if window else None
+        self.starts = deque()
+        self.log = []                                  # wall-clock start of every request (for idle-gap analysis)
+        self.aligned = dict(aligned) if aligned else None
+        self.win_counts = {}                           # aligned mode: requests started per provider window
+        if window:
+            self._restore()
         self.slots = threading.BoundedSemaphore(concurrency)
         self.lock = threading.Lock()
         self.next_at = 0.0
@@ -62,15 +77,92 @@ class _Service:
         self.session.mount("http://", adapter)
         self.session.headers["User-Agent"] = UA
 
+    def _aligned_turn(self):
+        """Next start time (wall clock) inside the provider's own fixed windows."""
+        cap, period = self.window
+        a = self.aligned
+        now = time.time()
+        k = int((now - a["phase"]) // period)
+        while True:
+            start = a["phase"] + k * period
+            t = max(now, start + a["after_reset"])
+            if self.win_counts.get(k, 0) < cap and t <= start + period - a["end_guard"]:
+                self.win_counts[k] = self.win_counts.get(k, 0) + 1
+                for old in [w for w in self.win_counts if w < k - 1]:
+                    del self.win_counts[old]
+                return t
+            k += 1
+
+    def learn_reset(self, sent_at, retry_after):
+        """A 429 says the window resets in Retry-After seconds (rounded down): re-learn the clock."""
+        if not self.aligned:
+            return
+        with self.lock:
+            self.aligned["phase"] = (sent_at + retry_after + 1.0) % self.window[1]
+            self.win_counts = {}
+            self._persist()
+
     def take_turn(self):
-        if not self.interval:
+        if self.aligned:
+            with self.lock:
+                at = self._aligned_turn()
+                self._persist()
+            if at > time.time():
+                time.sleep(at - time.time())
+            self.log.append(time.time())
+            return time.time()
+        if not self.interval and not self.window:
             return
         with self.lock:
             now = time.monotonic()
             at = max(now, self.next_at)
+            if self.window:
+                cap, span = self.window
+                while self.starts and self.starts[0] <= at - span:
+                    self.starts.popleft()
+                if len(self.starts) >= cap:              # wait until the oldest start leaves the window
+                    at = max(at, self.starts[-cap] + span)
+                self.starts.append(at)
+                self._persist()
             self.next_at = at + self.interval
         if at > now:
             time.sleep(at - now)
+        if self.window:
+            self.log.append(time.time())
+
+    # A provider's window doesn't reset because our process restarted: a resumed or back-to-back run
+    # must count the requests the previous run made in the last window. Kept in cache/rate_windows.json.
+    def _restore(self):
+        try:
+            rec = json.loads((CACHE / "rate_windows.json").read_text()).get(self.name, {})
+        except Exception:
+            rec = {}
+        offset = time.monotonic() - time.time()
+        for t in rec.get("starts", []):
+            if time.time() - t < self.window[1]:
+                self.starts.append(t + offset)
+        if rec.get("span"):
+            self.window = (self.window[0], min(max(rec["span"], self.base_span), self.base_span + 3.0))
+        if self.aligned:
+            if rec.get("phase") is not None:
+                self.aligned["phase"] = rec["phase"]
+            self.win_counts = {int(k): v for k, v in rec.get("counts", {}).items()}
+
+    def _persist(self):
+        path = CACHE / "rate_windows.json"
+        try:
+            allrec = json.loads(path.read_text())
+        except Exception:
+            allrec = {}
+        offset = time.time() - time.monotonic()
+        allrec[self.name] = {"starts": [t + offset for t in self.starts], "span": self.window[1]}
+        if self.aligned:
+            k_now = int((time.time() - self.aligned["phase"]) // self.window[1])
+            allrec[self.name].update(phase=self.aligned["phase"],
+                                     counts={str(k): v for k, v in self.win_counts.items() if k >= k_now})
+        tmp = path.with_suffix(f".{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(allrec))
+        tmp.replace(path)
 
     def hold_off(self, seconds):
         with self.lock:
@@ -82,17 +174,44 @@ _services = {k: _Service(k, **v) for k, v in SERVICES.items()}
 # ------------------------------------------------------------------ metrics
 _mlock = threading.Lock()
 _stats = defaultdict(lambda: {"requests": 0, "ok": 0, "errors": 0, "retries": 0, "rate_limited": 0,
-                              "breaker_trips": 0, "bytes": 0, "retry_after_max": 0, "status": {}, "latency": []})
+                              "breaker_trips": 0, "bytes": 0, "retry_after_max": 0, "status": {}, "latency": [],
+                              "ops": defaultdict(lambda: {"requests": 0, "status": {}})})
+
+
+def _op(service, url):
+    """A stable operation name for metrics: the URL path with ids/codes collapsed (track/isrc:*, artist/{id}/top)."""
+    if service.endswith("_cdn") or service == "images":
+        return "download"
+    out = []
+    for p in urlparse(url).path.split("/"):
+        if not p or p in ("ws", "2", "v1"):
+            continue
+        if ":" in p:
+            p = p.split(":")[0] + ":*"
+        elif p.isdigit() or re.fullmatch(r"[0-9a-f-]{36}|[A-Za-z0-9]{22}|[A-Z]{2}[A-Z0-9]{3}\d{7}", p):
+            p = "{id}"
+        out.append(p)
+    return "/".join(out[:4]) or "/"
+
+
+def _category(code):
+    if code.isdigit():
+        c = int(code)
+        return "ok" if c < 400 else "not_found" if c == 404 else "rate_limited" if c == 429 else "client_error" if c < 500 else "server_error"
+    return "timeout" if "Timeout" in code else "network"
 _cache = defaultdict(lambda: {"hits": 0, "misses": 0})
 
 
-def _record(name, seconds, resp, err):
+def _record(name, seconds, resp, err, op="/"):
     with _mlock:
         s = _stats[name]
         s["requests"] += 1
         s["latency"].append(seconds)
         code = str(resp.status_code) if resp is not None else type(err).__name__
         s["status"][code] = s["status"].get(code, 0) + 1
+        o = s["ops"][op]
+        o["requests"] += 1
+        o["status"][code] = o["status"].get(code, 0) + 1
         if resp is not None and resp.status_code < 400:
             s["ok"] += 1
             s["bytes"] += len(resp.content or b"")
@@ -122,11 +241,27 @@ def metrics():
     with _mlock:
         services = {}
         for k, s in _stats.items():
-            services[k] = {**{f: s[f] for f in s if f != "latency"},
+            cats = defaultdict(int)
+            for code, n in s["status"].items():
+                cats[_category(code)] += n
+            services[k] = {**{f: s[f] for f in s if f not in ("latency", "ops")},
+                           "ops": {o: dict(v) for o, v in s["ops"].items()}, "outcomes": dict(cats),
                            "p50_ms": _pct(s["latency"], .5), "p95_ms": _pct(s["latency"], .95),
                            "p99_ms": _pct(s["latency"], .99), "busy_s": round(sum(s["latency"]), 1)}
         caches = {k: {**v, "hit_rate": round(v["hits"] / max(1, v["hits"] + v["misses"]), 3)} for k, v in _cache.items()}
     return {"services": services, "caches": caches}
+
+
+def lane_gaps(service, min_gap=6.0):
+    """Where a windowed service sat idle longer than its normal pacing allows (seconds, wall clock)."""
+    sv = _services.get(service)
+    if not sv or not sv.log:
+        return {}
+    log = sorted(sv.log)
+    pace = sv.window[1] / sv.window[0] if sv.window else 0
+    gaps = [(round(a - log[0], 1), round(b - a, 1)) for a, b in zip(log, log[1:]) if b - a > max(min_gap, 3 * pace)]
+    return {"first_start": log[0], "last_start": log[-1], "span_s": round(log[-1] - log[0], 1),
+            "idle_gaps": gaps, "idle_total_s": round(sum(g for _, g in gaps), 1), "starts": len(log)}
 
 
 def write_metrics(extra=None):
@@ -144,19 +279,20 @@ def request(service, method, url, retries=4, **kw):
     """One request through the controller. Returns the Response (including 4xx, for the caller to
     judge). Raises ServicePaused for a long Retry-After, or the last network error after retries."""
     sv = _services[service]
+    op = _op(service, url)
     last_err = None
     for attempt in range(retries + 1):
         wait = sv.closed_until - time.monotonic()
         if wait > 0:
             time.sleep(wait)                          # breaker open: let the service breathe
-        sv.take_turn()
-        with sv.slots:
+        with sv.slots:                                # connection first, then the time slot: the booked time
+            sent_at = sv.take_turn() or time.time()   # must be the real send time, or bursts spill into the next window
             t = time.perf_counter()
             try:
                 r, err = sv.session.request(method, url, timeout=sv.timeout, **kw), None
             except requests.RequestException as ex:
                 r, err = None, ex
-            _record(service, time.perf_counter() - t, r, err)
+            _record(service, time.perf_counter() - t, r, err, op)
         if attempt:
             _bump(service, "retries")
         if r is not None and r.status_code == 429:
@@ -166,6 +302,14 @@ def request(service, method, url, retries=4, **kw):
                 _stats[service]["retry_after_max"] = max(_stats[service]["retry_after_max"], after)
             if after > LONG_PAUSE:
                 raise ServicePaused(service, after)
+            if sv.aligned:                            # their clock moved: re-learn where windows reset
+                sv.learn_reset(sent_at, after)
+                continue
+            if sv.window:                             # our clock and theirs disagree slightly: widen the margin
+                with sv.lock:
+                    cap, span = sv.window
+                    sv.window = (cap, min(span + 0.5, sv.base_span + 3.0))
+                    sv._persist()
             sv.hold_off(max(after, _backoff(attempt)))
             continue
         if r is not None and r.status_code < 500:
@@ -229,6 +373,19 @@ def pmap(fn, items, workers=16, on_result=None):
             if on_result:
                 on_result(it, res, n)
     return out
+
+
+# Which songs were actually sent for analysis in this run (for the per-song inventory).
+ANALYSED = defaultdict(set)
+
+
+def analysed(kind, song_id):
+    """Record a successful analysis: in memory for the run report, and appended to an audit log the instant
+    it returns (survives crashes, so tests can prove no song was ever analysed twice)."""
+    with _mlock:
+        ANALYSED[kind].add(song_id)
+        with open(CACHE / "analysis_log.jsonl", "a") as f:
+            f.write(json.dumps({"t": round(time.time(), 3), "kind": kind, "id": song_id}) + "\n")
 
 
 _inflight, _ilock = {}, threading.Lock()

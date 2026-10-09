@@ -1,6 +1,7 @@
 """Local dashboard server: python dashboard.py  ->  http://127.0.0.1:8050
 
-Serves the designed page in dashboard/ and these endpoints:
+Serves the designed page (React source in frontend/, built to frontend/dist/; rebuilt automatically when the
+source is newer than the build) and these endpoints:
   /api/profile             taste profile, sub-tastes, artwork, tempo landscapes, genre links
   /api/recommendations     live rank() with the dashboard's options
   /api/pipeline            analysis progress for the loading screen (GET), start/resume (POST .../start)
@@ -12,6 +13,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -26,17 +28,38 @@ import numpy as np
 import requests
 
 import progress
+import spotify_links
 from artist_genres import key
 from recommend import WEIGHTS, rank, score_all
 from taste_profile import SOURCE_WEIGHT, load, merge_duplicates
 
 ROOT = Path(__file__).parent
 from config import CACHE
-STATIC, IMG = ROOT / "dashboard", CACHE / "img"
+FRONTEND = ROOT / "frontend"
+STATIC, IMG = FRONTEND / "dist", CACHE / "img"
 IMG.mkdir(parents=True, exist_ok=True)
 PORT = 8050
 IMG_HOSTS = ("cdn-images.dzcdn.net", "e-cdns-images.dzcdn.net", "i.scdn.co", "mosaic.scdn.co")
 NEEDED = ("enriched.json", "profile.json", "candidates.json", "artwork.json")
+
+
+def build_page():
+    """Build the React page into frontend/dist when it's missing or older than its source (needs Node.js/npm)."""
+    built = STATIC / "index.html"
+    sources = [f for f in [*FRONTEND.glob("*.*"), *(FRONTEND / "src").rglob("*")] if f.is_file()]
+    if built.exists() and built.stat().st_mtime >= max(f.stat().st_mtime for f in sources):
+        return
+    npm = shutil.which("npm")
+    if not npm:
+        if built.exists():
+            print("Note: the page source changed but npm isn't installed, so the last built page is used.")
+            return
+        sys.exit("The dashboard page hasn't been built yet and npm isn't installed. Install Node.js, then run this again.")
+    print("Building the dashboard page...")
+    if not (FRONTEND / "node_modules").exists():
+        subprocess.run([npm, "ci", "--no-fund", "--no-audit"], cwd=FRONTEND, check=True)
+    if subprocess.run([npm, "run", "build", "--silent"], cwd=FRONTEND).returncode != 0:
+        sys.exit("Building the dashboard page failed (see above).")
 
 
 def stamp():
@@ -63,6 +86,11 @@ class Data:
             if g or key(name) not in self.genres:
                 self.genres[key(name)] = g
         self.scored = score_all(self.cands, self.profile)
+        for c in self.scored:                          # exact links found by earlier lazy lookups
+            if not c.get("spotify_exact") and c.get("isrc"):
+                url, _ = spotify_links.known(c["isrc"])
+                if url:
+                    c["spotify_url"], c["spotify_exact"] = url, True
         measured = [c for c in self.scored if c.get("measured")]
         tempos = [c["features"]["tempo"] for c in measured if (c.get("features") or {}).get("tempo")]
         lows = [c["bass"]["low_end_share"] for c in measured if c.get("bass")]
@@ -162,6 +190,8 @@ class Data:
                      weights=weights, bpm=rng("bpm"), bass=rng("bass"), n=int(num("n", 24)))
         out = []
         for c in picks:
+            if not c.get("spotify_exact") and "/search/" in (c.get("spotify_url") or ""):
+                RESOLVER.want(c.get("isrc"))           # exact link fetched in the background for next time
             art = self.cover(c["id"])
             g = self.genres.get(key(c["artist"])) or {}
             b = (c.get("bass") or {}).get("low_end_share")
@@ -179,6 +209,15 @@ class Data:
 
 
 DATA, DATA_STAMP, PROC = None, None, None
+
+
+def _link_found(isrc, url):
+    for c in (DATA.scored if DATA else []):
+        if c.get("isrc") == isrc:
+            c["spotify_url"], c["spotify_exact"] = url, True
+
+
+RESOLVER = spotify_links.Resolver(_link_found)
 LOCK = threading.Lock()
 
 
@@ -282,6 +321,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    build_page()
     CACHE.mkdir(exist_ok=True)
     if stamp() is None:
         print("No analysis yet: the page will show the loading screen and run it for you.")

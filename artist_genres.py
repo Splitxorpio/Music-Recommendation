@@ -99,14 +99,15 @@ def resolve_mbids(tracks, isrcs):
     # Last resort: exact-name search, only accepting a perfect, unambiguous match. Names MusicBrainz
     # doesn't know are remembered for a week, so re-digs don't ask again.
     unknown = load("artist_unknown.json", {})
+    todo = []
     for name in sorted(wanted - set(mbids)):
         if time.time() - unknown.get(name, 0) < 7 * 86400:
             net.cache_hit("mb_unknown_artists")
-            continue
-        data = mb_get("artist", {"query": f'artist:"{name}"', "limit": 3})
-        hits = [a for a in (data or {}).get("artists", []) if key(a["name"]) == key(name) and a.get("score", 0) == 100]
-        if len(hits) == 1:
-            mbids[name] = hits[0]["id"]
+        else:
+            todo.append(name)
+    for name, mbid in search_names(todo).items():
+        if mbid:
+            mbids[name] = mbid
         else:
             unknown[name] = time.time()
     save("artist_mbids.json", mbids)
@@ -115,15 +116,44 @@ def resolve_mbids(tracks, isrcs):
     return mbids
 
 
+NAME_BATCH = 20
+
+
+def _lucene(name):
+    return '"' + re.sub(r'([\\"])', r"\\\1", name) + '"'
+
+
+def search_names(names):
+    """Exact-name search, NAME_BATCH names per request. A name resolves only when exactly one returned
+    artist matches it exactly (normalised), so ambiguous names stay unresolved. {name: mbid or None}."""
+    out = {}
+    for k in range(0, len(names), NAME_BATCH):
+        chunk = names[k:k + NAME_BATCH]
+        data = mb_get("artist", {"query": "artist:(" + " OR ".join(_lucene(n) for n in chunk) + ")", "limit": 100}) or {}
+        found = data.get("artists", [])
+        for n in chunk:
+            hits = {a["id"] for a in found if key(a["name"]) == key(n)}
+            out[n] = hits.pop() if len(hits) == 1 else None
+    return out
+
+
 _vocab = None
+VOCAB_DAYS = 30
 
 
 def genre_vocabulary():
+    """MusicBrainz's curated genre list (~2,200 names). Kept for VOCAB_DAYS; it changes slowly."""
     global _vocab
     if _vocab is None:
-        r = net.get("musicbrainz", f"{MB}/genre/all", params={"fmt": "txt"})
-        r.raise_for_status()
-        _vocab = {g.strip() for g in r.text.splitlines() if g.strip()}
+        rec = load("mb_genre_vocabulary.json", None)
+        if rec and time.time() - rec["t"] < VOCAB_DAYS * 86400:
+            net.cache_hit("mb_genre_vocabulary")
+            _vocab = set(rec["v"])
+        else:
+            r = net.get("musicbrainz", f"{MB}/genre/all", params={"fmt": "txt"})
+            r.raise_for_status()
+            _vocab = {g.strip() for g in r.text.splitlines() if g.strip()}
+            save("mb_genre_vocabulary.json", {"t": time.time(), "v": sorted(_vocab)})
     return _vocab
 
 

@@ -1,0 +1,172 @@
+{
+ "created": 1791479574.62682,
+ "pairs": 55,
+ "by_source": {
+  "itunes": 15,
+  "deezer": 40
+ },
+ "model": {
+  "itunes": {
+   "instrumentalness": {
+    "a": 3e-05,
+    "b": 0.00106
+   },
+   "loudness": {
+    "a": -1.74002,
+    "b": 0.58074
+   }
+  },
+  "_report": {
+   "itunes": {
+    "acousticness": {
+     "n": 15,
+     "bias": 0.0612,
+     "correlation": 0.869,
+     "error_raw": 0.0927,
+     "error_corrected": 0.0998,
+     "applied": false
+    },
+    "danceability": {
+     "n": 15,
+     "bias": -0.0174,
+     "correlation": 0.774,
+     "error_raw": 0.0773,
+     "error_corrected": 0.0737,
+     "applied": false
+    },
+    "energy": {
+     "n": 15,
+     "bias": -0.0437,
+     "correlation": 0.806,
+     "error_raw": 0.0663,
+     "error_corrected": 0.0668,
+     "applied": false
+    },
+    "instrumentalness": {
+     "n": 15,
+     "bias": 0.0056,
+     "correlation": 0.076,
+     "error_raw": 0.0056,
+     "error_corrected": 0.0001,
+     "applied": true
+    },
+    "liveness": {
+     "n": 15,
+     "bias": -0.1246,
+     "correlation": 0.772,
+     "error_raw": 0.139,
+     "error_corrected": 0.1446,
+     "applied": false
+    },
+    "loudness": {
+     "n": 15,
+     "bias": -0.96,
+     "correlation": 0.79,
+     "error_raw": 1.1281,
+     "error_corrected": 1.0022,
+     "applied": true
+    },
+    "speechiness": {
+     "n": 15,
+     "bias": 0.0115,
+     "correlation": 0.793,
+     "error_raw": 0.0382,
+     "error_corrected": 0.051,
+     "applied": false
+    },
+    "valence": {
+     "n": 15,
+     "bias": 0.0568,
+     "correlation": 0.557,
+     "error_raw": 0.1566,
+     "error_corrected": 0.1656,
+     "applied": false
+    }
+   },
+   "deezer": {
+    "acousticness": {
+     "n": 40,
+     "bias": 0.1505,
+     "correlation": 0.803,
+     "error_raw": 0.1644,
+     "error_corrected": 0.0936,
+     "applied": true
+    },
+    "danceability": {
+     "n": 40,
+     "bias": -0.0325,
+     "correlation": 0.681,
+     "error_raw": 0.0834,
+     "error_corrected": 0.0767,
+     "applied": true
+    },
+    "energy": {
+     "n": 40,
+     "bias": -0.0361,
+     "correlation": 0.74,
+     "error_raw": 0.0784,
+     "error_corrected": 0.0801,
+     "applied": false
+    },
+    "instrumentalness": {
+     "n": 40,
+     "bias": 0.008,
+     "correlation": 0.221,
+     "error_raw": 0.0133,
+     "error_corrected": 0.0074,
+     "applied": true
+    },
+    "liveness": {
+     "n": 40,
+     "bias": -0.0769,
+     "correlation": 0.133,
+     "error_raw": 0.0972,
+     "error_corrected": 0.1088,
+     "applied": false
+    },
+    "loudness": {
+     "n": 40,
+     "bias": -0.7465,
+     "correlation": 0.555,
+     "error_raw": 1.2438,
+     "error_corrected": 1.1605,
+     "applied": true
+    },
+    "speechiness": {
+     "n": 40,
+     "bias": -0.003,
+     "correlation": 0.611,
+     "error_raw": 0.0611,
+     "error_corrected": 0.066,
+     "applied": false
+    },
+    "valence": {
+     "n": 40,
+     "bias": 0.0018,
+     "correlation": 0.867,
+     "error_raw": 0.0898,
+     "error_corrected": 0.0884,
+     "applied": false
+    }
+   }
+  },
+  "deezer": {
+   "acousticness": {
+    "a": -0.08008,
+    "b": 0.76081
+   },
+   "danceability": {
+    "a": 0.12113,
+    "b": 0.87145
+   },
+   "instrumentalness": {
+    "a": 0.00237,
+    "b": 0.14984
+   },
+   "loudness": {
+    "a": -1.49984,
+    "b": 0.6814
+   }
+  }
+ }
+}

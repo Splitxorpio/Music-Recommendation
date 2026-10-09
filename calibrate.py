@@ -11,6 +11,7 @@ Reads cache/enriched.json, cache/features.json, cache/previews/.
 Writes cache/calibration_pairs.json (raw comparisons) and cache/calibration_model.json.
 """
 import json
+import os
 import random
 import time
 from pathlib import Path
@@ -21,7 +22,7 @@ import requests
 import net
 import progress as P
 
-from config import CACHE
+from config import CACHE, ROOT
 PREVIEWS = CACHE / "previews"
 ANALYSE = "https://api.reccobeats.com/v1/analysis/audio-features"
 PER_SOURCE = 40
@@ -70,6 +71,7 @@ def collect_pairs(enriched, official):
             pairs[i] = {"source": jobs[i][0], "name": enriched[i]["name"],
                         "official": {t: official[i][t] for t in TRAITS},
                         "clip": {t: clip[t] for t in TRAITS}}
+            save("calibration_pairs.json", pairs)      # kept the moment it arrives
 
     # both clip sources at once; ReccoBeats' own limit in net.py keeps it to 4 in flight
     net.pmap(lambda i: analyse(PREVIEWS / f"{i}.{jobs[i][1]}", jobs[i][2]), jobs, workers=8, on_result=done)
@@ -125,11 +127,46 @@ def fit_model(pairs):
     return model
 
 
+# The calibration describes how Deezer/iTunes preview clips differ from official measurements: a property
+# of those services, not of anyone's library (two runs a day apart gave identical results). So it is kept
+# outside the cache, survives a cache clear, and is redone only when asked (--recalibrate / FREQUENCY_RECALIBRATE=1)
+# or when it is older than MAX_AGE_DAYS, so slow drift in the providers' encoding is still caught.
+STORED = ROOT / "models" / "calibration.json"
+MAX_AGE_DAYS = 90
+
+
+def stored():
+    try:
+        rec = json.loads(STORED.read_text())
+    except Exception:
+        return None
+    if os.environ.get("FREQUENCY_RECALIBRATE") == "1":
+        return None
+    if time.time() - rec.get("created", 0) > MAX_AGE_DAYS * 86400:
+        return None
+    return rec
+
+
 def main():
+    rec = stored()
+    if rec:
+        P.stage("calibrate", total=rec["pairs"], label="songs double-checked")
+        save("calibration_model.json", rec["model"])
+        net.cache_hit("calibration_reused")
+        when = time.strftime("%b %-d", time.localtime(rec["created"]))
+        P.fact(f"Reusing the calibration measured on {when} ({rec['pairs']} songs); no clips re-sent.", key="calibration")
+        P.finish("calibrate")
+        print(f"[calibrate] reused stored calibration from {when} ({rec['pairs']} pairs)")
+        return
     enriched = load("enriched.json", {})
     official = load("features.json", {})
     pairs = collect_pairs(enriched, official)
-    fit_model(pairs)
+    model = fit_model(pairs)
+    STORED.parent.mkdir(exist_ok=True)
+    by_src = {src: sum(1 for p in pairs.values() if p["source"] == src) for src in SOURCES}
+    tmp = STORED.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"created": time.time(), "pairs": len(pairs), "by_source": by_src, "model": model}, indent=1))
+    tmp.replace(STORED)
 
 
 if __name__ == "__main__":

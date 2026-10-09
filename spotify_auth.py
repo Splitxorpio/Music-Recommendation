@@ -5,8 +5,9 @@ day. spotipy would silently sleep through it, so 429 isn't auto-retried here: sh
 are waited out once, anything longer raises RateLimited straight away and callers decide whether
 to carry on without Spotify or stop.
 """
+import json
+import threading
 import time
-from pathlib import Path
 
 import requests
 import spotipy
@@ -14,6 +15,7 @@ from dotenv import load_dotenv
 from spotipy.oauth2 import SpotifyOAuth
 from urllib3.util.retry import Retry
 
+import net
 from config import CACHE, ROOT
 SCOPES = "user-top-read user-read-recently-played user-library-read"
 
@@ -43,15 +45,69 @@ def client():
     return sp
 
 
+# Spotify rate-limits each kind of request separately (verified Oct 8 2026: GET /me answered 200 while
+# GET /tracks/{id} was still under a 24 h block and search under a ~7 h one). So blocks are remembered per
+# operation, in a file every process shares, and no request of a blocked kind is sent until it expires.
+COOLDOWNS = CACHE / "spotify_cooldowns.json"
+_lock = threading.Lock()
+
+
+def _cooldowns():
+    try:
+        return json.loads(COOLDOWNS.read_text())
+    except Exception:
+        return {}
+
+
+def _save_cooldowns(d):
+    tmp = COOLDOWNS.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=1))
+    tmp.replace(COOLDOWNS)
+
+
+def blocked(op):
+    """Seconds left on a known block for this kind of request (0 if none)."""
+    with _lock:
+        until = _cooldowns().get(op, {}).get("until", 0)
+    return max(0, until - time.time())
+
+
 def call(fn, *args, **kwargs):
-    """Run one Spotify request; wait out a short rate limit once, raise RateLimited for a long one."""
+    """Run one Spotify request. A short rate limit (<= 30 s) is waited out once; a longer one is
+    recorded for this kind of request and raised as RateLimited. Requests of a kind that is known
+    to be blocked are not sent at all."""
+    op = getattr(fn, "__name__", "spotify")
+    left = blocked(op)
+    if left:
+        net.cache_hit("spotify_avoided_during_block")
+        raise RateLimited(int(left))
     for attempt in range(2):
+        t = time.perf_counter()
         try:
-            return fn(*args, **kwargs)
+            res = fn(*args, **kwargs)
+            net._record("spotify", time.perf_counter() - t, _Ok(), None, op)
+            return res
         except spotipy.SpotifyException as ex:
+            net._record("spotify", time.perf_counter() - t, _Status(ex.http_status), None, op)
             if ex.http_status != 429:
                 raise
             wait = int((ex.headers or {}).get("Retry-After", 30))
+            net._bump("spotify", "rate_limited")
             if wait > 30 or attempt:
+                with _lock:
+                    d = _cooldowns()
+                    d[op] = {"until": time.time() + wait, "retry_after": wait, "status": 429,
+                             "seen": time.strftime("%Y-%m-%d %H:%M:%S")}
+                    _save_cooldowns(d)
                 raise RateLimited(wait) from ex
             time.sleep(wait + 1)
+
+
+class _Status:                                   # minimal stand-ins so net's metrics can record Spotify calls
+    def __init__(self, code):
+        self.status_code, self.content = code, b""
+
+
+class _Ok(_Status):
+    def __init__(self):
+        super().__init__(200)

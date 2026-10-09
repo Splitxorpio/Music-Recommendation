@@ -17,18 +17,22 @@ Writes:
 Resumable: every step skips work already in the cache files.
 """
 import json
+import os
 import re
 import subprocess
+import threading
 import time
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from concurrent.futures import ThreadPoolExecutor
+
 import librosa
 import numpy as np
 
+import deezer
 import net
 import progress as P
-from spotify_auth import RateLimited, call, client
 
 from config import CACHE
 PREVIEWS = CACHE / "previews"
@@ -48,6 +52,9 @@ def save(name, obj):
     """Atomic write: stages run side by side, so a reader must never see a half-written file."""
     tmp = CACHE / f".{name}.tmp"
     tmp.write_text(json.dumps(obj, indent=1))
+    if FAULT == "mid_save" and name == "estimated_features.json" and len(obj) >= 20:
+        print("[fault] exiting mid-save: new file written, not yet swapped in", flush=True)
+        os._exit(137)
     tmp.replace(CACHE / name)
 
 
@@ -91,35 +98,20 @@ def best_match(track):
 
 
 def step_isrc(tracks, todo):
-    """Spotify blocks batch track lookups for new apps, so fetch one at a time."""
+    """Recording codes (ISRCs) from data we already hold: the Spotify pull itself (full track objects
+    carry external_ids.isrc), ReccoBeats' official data, and earlier runs. A per-track Spotify lookup
+    would return the very same track object, so it is never made (634 of them on Oct 7 2026 earned a
+    24 h block on that endpoint). Songs with no code at all fall back to the iTunes name search."""
     isrc = load("isrc.json", {})
-    # Most codes are already known: from the Spotify pull itself, or from ReccoBeats' official data.
     for i in todo:
         if not isrc.get(i):
             code = tracks[i].get("isrc") or (load_features_cached().get(i) or {}).get("isrc")
             if code:
                 isrc[i] = code
-    need = [i for i in todo if i not in isrc]
-    if need:
-        sp = client()
-        print(f"[isrc] fetching {len(need)} ISRCs from Spotify")
-        for n, i in enumerate(need, 1):
-            P.tick(n, len(need), now=f"reading the barcode on {tracks[i]['name']}", label="recording codes")
-            try:
-                isrc[i] = call(sp.track, i)["external_ids"].get("isrc")
-                time.sleep(0.35)
-            except RateLimited as ex:
-                # Carry on without Spotify: these songs fall back to the iTunes name search.
-                P.fact(f"{ex} Skipping {len(need) - n + 1} recording codes; iTunes can cover them.", key="ratelimit")
-                break
-            except Exception as ex:
-                print(f"  no ISRC for {tracks[i]['name']}: {ex}")
-                isrc[i] = None
-            if n % 50 == 0:
-                save("isrc.json", isrc)
-        save("isrc.json", isrc)
-    else:
-        save("isrc.json", isrc)
+    missing = [i for i in todo if not isrc.get(i)]
+    if missing:
+        print(f"[isrc] {len(missing)} songs have no recording code anywhere; they'll use the iTunes search")
+    save("isrc.json", isrc)
     return isrc
 
 
@@ -132,7 +124,9 @@ def load_features_cached():
 
 
 def deezer_lookup(code):
-    r = net.deezer_json(f"track/isrc:{code}")
+    """Deezer's answer for a recording code, from the shared store when its preview link is still live
+    (the same answers the new-songs and artwork steps reuse)."""
+    r = deezer.track_with_preview(f"track/isrc:{code}")
     return r if r and r.get("preview") else None
 
 
@@ -159,9 +153,16 @@ def step_deezer(tracks, itunes):
     The preview link in the answer is used straight away to download the clip."""
     dz = load("deezer_matches.json", {})
     todo = [i for i in tracks if i not in itunes and i not in dz]
+    for i, m in {**itunes, **dz}.items():             # resumed run: earlier matches can start measuring now
+        if i in tracks:
+            measure_early(i, m, load_features_cached())
     isrc = step_isrc(tracks, todo)
     todo = [i for i in todo if isrc.get(i)]
     print(f"[deezer] {len(todo)} tracks to look up by ISRC")
+
+    # Lookups and downloads use separate workers, so a slow download never holds up the next lookup.
+    downloads = ThreadPoolExecutor(max_workers=8)
+    pending = []
 
     def work(i):
         r = deezer_lookup(isrc[i])
@@ -169,11 +170,16 @@ def step_deezer(tracks, itunes):
             return None
         m = {"source": "deezer", "isrc": isrc[i], "deezer_title": r.get("title"),
              "deezer_artist": r.get("artist", {}).get("name")}
+        return m, (r.get("album") or {}).get("cover_big"), r["preview"]
+
+    features = load_features_cached()
+
+    def fetch(i, m, url):
         try:
-            fetch_clip(clip_path(i, m), r["preview"], "deezer_cdn")
+            fetch_clip(clip_path(i, m), url, "deezer_cdn")
+            measure_early(i, m, features)
         except Exception as ex:                       # the measure step retries with a fresh link
             print(f"  clip download failed for {tracks[i]['name']}: {ex}")
-        return m, (r.get("album") or {}).get("cover_big")
 
     def done(i, res, n):
         P.tick(n, len(todo), now=f"found {tracks[i]['name']} — {tracks[i]['artists'][0]} on Deezer", label="checked on Deezer")
@@ -182,10 +188,14 @@ def step_deezer(tracks, itunes):
         elif res:
             dz[i] = res[0]
             P.cover(res[1], tracks[i]["name"], tracks[i]["artists"][0])
+            pending.append(downloads.submit(fetch, i, res[0], res[2]))
         if n % 100 == 0:
             save("deezer_matches.json", dz)
 
-    net.pmap(work, todo, workers=16, on_result=done)
+    net.pmap(work, todo, workers=10, on_result=done)
+    for f in pending:
+        f.result()
+    downloads.shutdown()
     save("deezer_matches.json", dz)
     return dz
 
@@ -199,6 +209,7 @@ def step_match(tracks):
         if b and b["score"] >= MATCH_MIN:
             try:
                 fetch_clip(clip_path(i, b), b["preview_url"], "itunes_cdn")
+                measure_early(i, b, load_features_cached())
             except Exception as ex:
                 print(f"  clip download failed for {tracks[i]['name']}: {ex}")
         return b
@@ -214,6 +225,8 @@ def step_match(tracks):
             near[i] = {"spotify": f'{tracks[i]["name"]} - {", ".join(tracks[i]["artists"])}', **b}
         else:
             near[i] = None                             # searched, nothing usable
+        save("itunes_matches.json", matches)          # every search kept as it happens (iTunes allows ~20/min)
+        save("near_misses.json", near)
 
     net.pmap(work, todo, workers=3, on_result=done)   # iTunes' own limiter paces the searches
     save("itunes_matches.json", matches)
@@ -277,17 +290,17 @@ def bass_measures(wav):
 
 
 def step_audio(tracks, features, matches):
-    est, bass = load("estimated_features.json", {}), load("bass.json", {})
+    est, bass = load_estimates_cached(), load_bass_cached()      # the same dicts early results go into
     todo = [i for i in matches if i not in bass or (i not in features and i not in est)]
     print(f"[audio] {len(todo)} clips to process")
     P.stage("lowend", total=len(todo), label="clips measured")
     loudest = max(bass.values(), key=lambda b: b["low_end_share"], default=None)
 
     def work(i):
-        clip = download(i, matches[i])
-        b = None if i in bass else bass_from_clip(clip)
-        e = analyse_clip(clip) if (i not in features and i not in est) else None
-        return b, e
+        early = EARLY.pop(i, None)                    # already measured while clips were still arriving
+        if early is not None:
+            return early.result()
+        return measure_one(i, matches[i], i not in bass, i not in features and i not in est)
 
     def done(i, res, n):
         nonlocal loudest
@@ -296,22 +309,91 @@ def step_audio(tracks, features, matches):
             print(f"  skipped {tracks[i]['name']}: {res}")
             return
         b, e = res
+        keep(i, b, e)
         if b:
-            bass[i] = b
             if not loudest or b["low_end_share"] > loudest["low_end_share"]:
                 loudest = b
                 P.fact(f"Heaviest bass so far: {tracks[i]['name']} by {tracks[i]['artists'][0]}", key="heaviest")
-        if e:
-            est[i] = e
         if n % 50 == 0:
-            save("estimated_features.json", est)
-            save("bass.json", bass)
             print(f"  processed {n}/{len(todo)}")
 
     net.pmap(work, todo, workers=12, on_result=done)
     save("estimated_features.json", est)
     save("bass.json", bass)
     return est, bass
+
+
+# Clips are measured the moment they land, not after every clip has been found: ReccoBeats is the
+# slowest service (15 analyses per 30 s), so it should start on the first clip, not wait ~2 minutes.
+EARLY = {}
+_early_pool = ThreadPoolExecutor(max_workers=6)
+
+
+# Test-only fault injection (FREQUENCY_FAULT): "after_analysis:N" exits right after the Nth analysis comes
+# back but before it is saved; "mid_save" exits halfway through writing a cache file. Never set in normal use.
+FAULT = os.environ.get("FREQUENCY_FAULT", "")
+_fault_count = 0
+_fault_lock = threading.Lock()
+
+
+def _maybe_fault_after_analysis():
+    global _fault_count
+    if FAULT.startswith("after_analysis:"):
+        with _fault_lock:
+            _fault_count += 1
+            if _fault_count >= int(FAULT.split(":")[1]):
+                print(f"[fault] exiting after analysis #{_fault_count}, before saving it", flush=True)
+                os._exit(137)
+
+
+def measure_one(i, match, need_bass, need_estimate):
+    clip = download(i, match)
+    b = bass_from_clip(clip) if need_bass else None
+    e = analyse_clip(clip) if need_estimate else None
+    if e:
+        net.analysed("library", i)
+        _maybe_fault_after_analysis()
+    return b, e
+
+
+_plock = threading.Lock()
+
+
+def keep(i, b, e):
+    """Persist one song's results the moment they exist, so a crash never costs an analysis twice."""
+    with _plock:
+        if b:
+            load_bass_cached()[i] = b
+            save("bass.json", load_bass_cached())
+        if e:
+            load_estimates_cached()[i] = e
+            save("estimated_features.json", load_estimates_cached())
+
+
+def measure_early(i, match, features):
+    """Called as soon as a clip is on disk; results are saved as soon as they arrive."""
+    est, bass = load_estimates_cached(), load_bass_cached()
+    with _plock:
+        need_bass, need_est = i not in bass, i not in features and i not in est
+    if need_bass or need_est:
+        fut = _early_pool.submit(measure_one, i, match, need_bass, need_est)
+        fut.add_done_callback(lambda f, i=i: f.exception() is None and keep(i, *f.result()))
+        EARLY[i] = fut
+
+
+_est_cache = _bass_cache = None
+def load_estimates_cached():
+    global _est_cache
+    if _est_cache is None:
+        _est_cache = load("estimated_features.json", {})
+    return _est_cache
+
+
+def load_bass_cached():
+    global _bass_cache
+    if _bass_cache is None:
+        _bass_cache = load("bass.json", {})
+    return _bass_cache
 
 
 def step_merge(tracks, features, est, bass):

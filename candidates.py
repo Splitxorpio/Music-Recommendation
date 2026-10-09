@@ -28,12 +28,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
+import deezer
 import net
 import progress as P
 from artist_genres import genres_for, key, mb_get, resolve_isrcs
 from enrich_audio import PREVIEWS, analyse_clip, bass_from_clip, fetch_clip, norm
 from recommend import score_all, total
-from spotify_auth import RateLimited, call, client
+import spotify_links
 from taste_profile import SOURCE_WEIGHT
 
 from config import CACHE
@@ -65,31 +66,13 @@ def save(name, obj):
     tmp.replace(CACHE / name)
 
 
-_dz = load("deezer_cache.json", {})
-_dz_lock = threading.Lock()
+def dz(path, fresh=False, **params):
+    """Deezer answer from the shared, expiring store (see deezer.py)."""
+    return deezer.get(path, fresh=fresh, **params)
 
 
 def save_dz():
-    with _dz_lock:
-        snapshot = dict(_dz)
-    save("deezer_cache.json", snapshot)
-
-
-def dz(path, fresh=False, **params):
-    """Cached Deezer GET (through net's limiter). fresh=True skips the cache (preview URLs expire).
-    Identical requests already in flight are shared rather than repeated."""
-    k = path + "?" + "&".join(f"{a}={b}" for a, b in sorted(params.items()))
-    if not fresh:
-        with _dz_lock:
-            if k in _dz:
-                net.cache_hit("deezer_responses")
-                return _dz[k]
-        net.cache_hit("deezer_responses", False)
-    j = net.once(("dz", k, fresh), lambda: net.deezer_json(path, **params))
-    if not fresh:
-        with _dz_lock:
-            _dz[k] = j
-    return j
+    deezer.save()
 
 
 def fan(fn, items, workers=16):
@@ -253,13 +236,26 @@ def gather(enriched, features, isrc_map, profile):
 
     # Minor source: ReccoBeats sound-alikes, seeded per sub-taste with its most-played official songs
     # (needs the fingerprint, so a prefetch run without a profile skips it)
+    recco_cache = load("recco_suggestions.json", {})   # random per call, like radio: kept for a day
+
     def recco(cl):
         ids = sorted((i for i, v in profile["track_clusters"].items()
                       if v["cluster"] == cl["id"] and enriched.get(i, {}).get("feature_source") == "official"),
                      key=lambda i: -profile["track_clusters"][i]["weight"])[:5]
-        r = net.get("reccobeats", f"{RECCO}/track/recommendation", params={"size": RECCO_PER_CLUSTER, "seeds": ",".join(ids)})
-        return r.json() if r.ok else {}
+        k = ",".join(ids)
+        rec = recco_cache.get(k)
+        if rec and time.time() - rec["t"] < 86400:
+            net.cache_hit("recco_suggestions")
+            return rec["v"]
+        net.cache_hit("recco_suggestions", False)
+        r = net.get("reccobeats", f"{RECCO}/track/recommendation", params={"size": RECCO_PER_CLUSTER, "seeds": k})
+        v = r.json() if r.ok else {}
+        if r.ok:
+            recco_cache[k] = {"t": time.time(), "v": v}
+        return v
     suggestions = fan(recco, profile["clusters"], workers=4) if profile else []
+    if profile:
+        save("recco_suggestions.json", recco_cache)
     picks = [(cl, t) for cl, r in zip(profile["clusters"] if profile else [], suggestions)
              for t in (r or {}).get("content", []) if t.get("isrc") and t["isrc"] not in lib_isrcs]
     looked = fan(lambda ct: dz(f"track/isrc:{ct[1]['isrc']}"), picks)
@@ -302,23 +298,38 @@ def gather(enriched, features, isrc_map, profile):
 
 # ---------- stage 2: measure ----------
 
+OFFICIAL_FOUND_DAYS, OFFICIAL_MISSING_DAYS = 30, 1
+
+
 def official_features(cands):
-    codes = [c["isrc"] for c in cands.values() if "features" not in c]
+    """Official ReccoBeats values by ISRC, 40 per request. Answers are remembered: found ones for 30 days,
+    'not found' for 1 day (ReccoBeats keeps adding songs, so an estimate should upgrade when it can)."""
+    store = load("official_store.json", {})
+    now = time.time()
+    def fresh(code):
+        rec = store.get(code)
+        return rec and now - rec["t"] < (OFFICIAL_FOUND_DAYS if rec["v"] else OFFICIAL_MISSING_DAYS) * 86400
+    pending = [c for c in cands.values() if "features" not in c]
+    codes = sorted({c["isrc"] for c in pending if not fresh(c["isrc"])})
+    for c in pending:
+        net.cache_hit("official_store", fresh(c["isrc"]))
     chunks = [tuple(codes[i:i + 40]) for i in range(0, len(codes), 40)]
 
     def batch(chunk):
         r = net.get("reccobeats", f"{RECCO}/audio-features", params={"ids": ",".join(chunk)})
-        return r.json().get("content", []) if r.ok else []
-    found = {}
-    for res in fan(batch, chunks, workers=4):
-        for f in res or []:
-            if f.get("isrc"):
-                found[f["isrc"]] = f
-    for c in cands.values():
-        if "features" not in c:
-            f = found.get(c["isrc"])
-            c["features"], c["feature_source"] = (f, "official") if f else (None, "no_data")
-    print(f"[official] {sum(c['feature_source'] == 'official' for c in cands.values())}/{len(cands)} have official values")
+        return r.json().get("content", []) if r.ok else None
+    for chunk, res in zip(chunks, fan(batch, chunks, workers=4)):
+        if res is None:
+            continue                                   # failed batch: ask again next time
+        got = {f["isrc"]: f for f in res if f.get("isrc")}
+        for code in chunk:
+            store[code] = {"t": now, "v": got.get(code)}
+    save("official_store.json", store)
+    for c in pending:
+        f = (store.get(c["isrc"]) or {}).get("v")
+        c["features"], c["feature_source"] = (f, "official") if f else (None, "no_data")
+    print(f"[official] {sum(c['feature_source'] == 'official' for c in cands.values())}/{len(cands)} have official values "
+          f"({len(codes)} looked up, {len(pending) - len(codes)} remembered)")
 
 
 def candidate_genres(chosen, mbids, genres):
@@ -334,14 +345,8 @@ def candidate_genres(chosen, mbids, genres):
 
 
 def preview_url(c):
-    """The preview link from the cached details if it hasn't expired yet; otherwise a fresh one."""
-    d = dz(f"track/{c['deezer_id']}")
-    url = (d or {}).get("preview") or ""
-    m = re.search(r"exp=(\d+)", url)
-    if url and m and int(m.group(1)) > time.time() + 120:
-        return url
-    fresh = dz(f"track/{c['deezer_id']}", fresh=True)
-    return (fresh or {}).get("preview")
+    """The preview link: the stored one if it hasn't expired yet, otherwise a fresh one."""
+    return (deezer.track_with_preview(f"track/{c['deezer_id']}") or {}).get("preview")
 
 
 _measured = None          # song id -> {"bass", "est"}: survives a re-dig, so nothing is measured twice
@@ -367,6 +372,8 @@ def measure_clip(c):
         net.cache_hit("clips")
     bass = c.get("bass") or bass_from_clip(path)
     est = analyse_clip(path) if c["feature_source"] == "no_data" else None
+    if est:
+        net.analysed("new_songs", c["id"])
     with _mlock:
         _measured[c["id"]] = {"bass": bass, "est": est}
     return bass, est
@@ -414,6 +421,8 @@ def stage2(cands, profile):
                 c["bass"] = bass
             if est:
                 c["features"], c["feature_source"] = est, "estimated_from_preview"
+                with _mlock:
+                    save("song_measurements.json", dict(_measured))   # kept the moment it arrives
             c["measured"] = True
             if n % 50 == 0:
                 save("candidates.json", cands)
@@ -425,29 +434,16 @@ def stage2(cands, profile):
         net.pmap(lambda cid: measure_clip(by_id[cid]), with_clip, workers=12, on_result=done)
         genre_job.result()
 
-    # Spotify links: ReccoBeats usually already has them; searching Spotify is a last resort.
-    sp, spotify_paused = None, False
+    # Spotify links: from ReccoBeats' data, or remembered from an earlier lookup. No Spotify requests here:
+    # the dashboard resolves exact links lazily for the songs it actually shows (see spotify_links.py).
     for c in chosen:
-        if c.get("spotify_url"):
-            continue
         href = (c.get("features") or {}).get("href") or ""
         if "open.spotify.com/track/" in href:
-            c["spotify_url"], c["spotify_id"] = href, href.rstrip("/").split("/")[-1]
+            c["spotify_url"], c["spotify_id"], c["spotify_exact"] = href, href.rstrip("/").split("/")[-1], True
             continue
-        if not spotify_paused:
-            try:
-                sp = sp or client()
-                hit = call(sp.search, q=f"isrc:{c['isrc']}", type="track", limit=1)["tracks"]["items"]
-                if hit:
-                    c["spotify_id"], c["spotify_url"] = hit[0]["id"], hit[0]["external_urls"]["spotify"]
-                time.sleep(0.35)
-            except RateLimited as ex:
-                spotify_paused = True
-                P.fact(f"{ex} New songs get a Spotify search link instead.", key="ratelimit")
-            except Exception as ex:
-                print(f"  spotify search failed for {c['title']}: {ex}")
-        if not c.get("spotify_url"):
-            c["spotify_url"] = "https://open.spotify.com/search/" + requests.utils.quote(f"{c['title']} {c['artist']}")
+        url, _ = spotify_links.known(c["isrc"])
+        c["spotify_exact"] = bool(url)
+        c["spotify_url"] = url or spotify_links.search_link(c["title"], c["artist"])
 
     save("candidates.json", cands)
     save("artist_mbids.json", mbids)
@@ -465,8 +461,9 @@ def prefetch():
         return
     tracks, features, isrc_map = load("tracks.json", {}), load("features.json", {}), load("isrc.json", {})
     P.stage("crates", label="artists followed")
-    gather(tracks, features, isrc_map, profile=None)
-    print("[prefetch] Deezer cache warmed for candidate gathering")
+    ahead = gather(tracks, features, isrc_map, profile=None)
+    official_features(ahead)                          # their official-number lookups too (remembered by ISRC)
+    print(f"[prefetch] Deezer answers and official lookups ready for {len(ahead)} candidates")
 
 
 def main():

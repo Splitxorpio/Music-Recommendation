@@ -58,15 +58,15 @@ def collect_tracks(sp):
                     break
                 offset += 50
             add(items, f"top_{rng}")
-        except RateLimited:
-            raise
+        except RateLimited as ex:                  # this list is blocked; the others still come in
+            status[f"top_{rng}"] = ("blocked", ex.seconds)
         except Exception as ex:
             status[f"top_{rng}"] = f"FAILED: {ex}"
 
     try:
         add([i["track"] for i in call(sp.current_user_recently_played, limit=50)["items"]], "recent")
-    except RateLimited:
-        raise
+    except RateLimited as ex:
+        status["recent"] = ("blocked", ex.seconds)
     except Exception as ex:
         status["recent"] = f"FAILED: {ex}"
 
@@ -79,8 +79,8 @@ def collect_tracks(sp):
                 break
             offset += 50
         add(items, "saved")
-    except RateLimited:
-        raise
+    except RateLimited as ex:
+        status["saved"] = ("blocked", ex.seconds)
     except Exception as ex:
         status["saved"] = f"FAILED: {ex}"
 
@@ -114,15 +114,39 @@ def fetch_features(ids):
 
 
 def main():
+    previous = json.loads((CACHE / "tracks.json").read_text()) if (CACHE / "tracks.json").exists() else None
     P.stage("login")
     sp = client()
-    me = call(sp.current_user)
+    try:
+        me = call(sp.current_user)
+    except RateLimited as ex:
+        if not previous:
+            raise
+        # Spotify is blocking even the login check: carry on with the last song list, clearly labelled.
+        when = time.strftime("%b %-d", time.localtime((CACHE / "tracks.json").stat().st_mtime))
+        P.fact(f"{ex} Using your song list from {when} (last known).", key="ratelimit")
+        for k in ("login", "pull", "notes"):
+            P.stage(k)
+            P.finish(k)
+        return
     print("Logged in as:", me["id"])
     P.fact(f"Signed in as {me.get('display_name') or me['id']}")
     P.finish("login")
 
     P.stage("pull", label="songs found")
     tracks, status = collect_tracks(sp)
+    blocked = [k for k, v in status.items() if isinstance(v, tuple)]
+    if blocked and previous:
+        # Lists Spotify is blocking right now are filled from the last saved list (other lists are fresh).
+        for i, t in previous.items():
+            carried = [s for s in t["sources"] if s in blocked]
+            if carried:
+                e = tracks.setdefault(i, {**t, "sources": []})
+                e["sources"] = sorted(set(e["sources"]) | set(carried))
+        P.fact(f"Spotify is pausing your {', '.join(b.replace('_', ' ') for b in blocked)} list; "
+               f"used the last saved copy for those.", key="ratelimit")
+    elif blocked and not tracks:
+        raise RateLimited(max(v[1] for v in status.values() if isinstance(v, tuple)))
     # Spotify already sent each song's recording code (ISRC); keep them so nothing has to ask again.
     known = json.loads((CACHE / "isrc.json").read_text()) if (CACHE / "isrc.json").exists() else {}
     known.update({i: t["isrc"] for i, t in tracks.items() if t.get("isrc")})
@@ -132,7 +156,7 @@ def main():
     P.fact(f"{len(tracks)} songs on your shelves")
     if top:
         P.fact(f"Most of the shelf belongs to {top[0][0]}: {top[0][1]} songs", key="top-artist")
-    failed = [k for k, v in status.items() if isinstance(v, str)]
+    failed = [k for k, v in status.items() if isinstance(v, str) and v.startswith("FAILED")]
     if failed:
         P.fact(f"Spotify wouldn't hand over: {', '.join(failed)}")
     P.finish("pull")
