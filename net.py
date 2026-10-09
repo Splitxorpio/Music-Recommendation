@@ -32,10 +32,11 @@ SERVICES = {
     "deezer_cdn":  {"rate": None, "concurrency": 8, "timeout": 60},
     "itunes":      {"rate": 0.33, "concurrency": 1, "timeout": 20},
     "itunes_cdn":  {"rate": None, "concurrency": 6, "timeout": 60},
-    "reccobeats":  {"rate": 4.0,  "concurrency": 4, "timeout": 60},     # batch lookups
+    # Lookups share the analysis allowance (measured Oct 9: 14 analyses + 8 lookups fill a window, the 9th lookup
+    # and a 15th analysis are refused; 26 lookups alone fit): a lookup costs ~1/8 of an analysis, whatever its size.
+    "reccobeats":  {"rate": 4.0,  "concurrency": 4, "timeout": 60, "budget": ("reccobeats_upload", 0.125)},
     # Clip analysis: measured Oct 9 2026 as a fixed window of 15 requests per 30 s (15 succeed back to
-    # back, the 16th gets 429 with Retry-After = time to the window's end). A rolling 15-per-31 s limit can
-    # never exceed any 30 s window, so it uses the full allowance with zero rejections.
+    # back, the 16th gets 429 with Retry-After = time to the window's end, rounded down).
     # Measured again Oct 9: the windows are on a fixed clock (reset ~10 s past each 30 s mark of Unix time,
     # stable across bursts and not anchored to our requests), and Retry-After is rounded down. So requests
     # are lined up with that clock: 15 just after each reset, every 30 s exactly - the full permitted rate.
@@ -56,7 +57,7 @@ class ServicePaused(Exception):
 
 
 class _Service:
-    def __init__(self, name, rate, concurrency, timeout, window=None, aligned=None):
+    def __init__(self, name, rate, concurrency, timeout, window=None, aligned=None, budget=None):
         self.name, self.timeout = name, timeout
         self.interval = 1 / rate if rate else 0.0
         self.window = window
@@ -64,6 +65,7 @@ class _Service:
         self.starts = deque()
         self.log = []                                  # wall-clock start of every request (for idle-gap analysis)
         self.aligned = dict(aligned) if aligned else None
+        self.budget = budget                           # (service whose windows we book into, cost per request)
         self.win_counts = {}                           # aligned mode: requests started per provider window
         if window:
             self._restore()
@@ -77,8 +79,8 @@ class _Service:
         self.session.mount("http://", adapter)
         self.session.headers["User-Agent"] = UA
 
-    def _aligned_turn(self):
-        """Next start time (wall clock) inside the provider's own fixed windows."""
+    def _aligned_turn(self, cost=1.0):
+        """Next start time (wall clock) inside the provider's own fixed windows, booking `cost` units."""
         cap, period = self.window
         a = self.aligned
         now = time.time()
@@ -86,8 +88,8 @@ class _Service:
         while True:
             start = a["phase"] + k * period
             t = max(now, start + a["after_reset"])
-            if self.win_counts.get(k, 0) < cap and t <= start + period - a["end_guard"]:
-                self.win_counts[k] = self.win_counts.get(k, 0) + 1
+            if self.win_counts.get(k, 0) + cost <= cap + 1e-9 and t <= start + period - a["end_guard"]:
+                self.win_counts[k] = self.win_counts.get(k, 0) + cost
                 for old in [w for w in self.win_counts if w < k - 1]:
                     del self.win_counts[old]
                 return t
@@ -98,18 +100,27 @@ class _Service:
         if not self.aligned:
             return
         with self.lock:
-            self.aligned["phase"] = (sent_at + retry_after + 1.0) % self.window[1]
-            self.win_counts = {}
+            cap, period = self.window
+            reset = sent_at + retry_after + 1.0           # Retry-After is rounded down: reset is within 1 s after
+            self.aligned["phase"] = reset % period
+            # Everything before that reset is used up. (Clearing the counts here instead caused a rejection
+            # storm in the Oct 9 benchmark: 686 of 818 requests rejected.)
+            k_full = int((sent_at - self.aligned["phase"]) // period)
+            self.win_counts = {k_full: cap}
             self._persist()
 
-    def take_turn(self):
+    def take_turn(self, cost=1.0):
+        if self.budget:                                # book into another service's windows (shared allowance)
+            owner, unit = self.budget
+            return _services[owner].take_turn(unit)
         if self.aligned:
             with self.lock:
-                at = self._aligned_turn()
+                at = self._aligned_turn(cost)
                 self._persist()
             if at > time.time():
                 time.sleep(at - time.time())
-            self.log.append(time.time())
+            if cost >= 1.0:
+                self.log.append(time.time())
             return time.time()
         if not self.interval and not self.window:
             return
@@ -146,7 +157,7 @@ class _Service:
         if self.aligned:
             if rec.get("phase") is not None:
                 self.aligned["phase"] = rec["phase"]
-            self.win_counts = {int(k): v for k, v in rec.get("counts", {}).items()}
+            self.win_counts = {int(k): float(v) for k, v in rec.get("counts", {}).items()}
 
     def _persist(self):
         path = CACHE / "rate_windows.json"
@@ -275,13 +286,17 @@ def _backoff(attempt):
     return min(30.0, 0.5 * 2 ** attempt) * (0.5 + random.random())   # exponential, with jitter
 
 
+SCHEDULE_RETRIES = 12      # windowed services: a 429 is a scheduling signal, retried on its own budget
+
+
 def request(service, method, url, retries=4, **kw):
     """One request through the controller. Returns the Response (including 4xx, for the caller to
     judge). Raises ServicePaused for a long Retry-After, or the last network error after retries."""
     sv = _services[service]
     op = _op(service, url)
     last_err = None
-    for attempt in range(retries + 1):
+    attempt, rejected = 0, 0
+    while attempt <= retries:
         wait = sv.closed_until - time.monotonic()
         if wait > 0:
             time.sleep(wait)                          # breaker open: let the service breathe
@@ -293,7 +308,7 @@ def request(service, method, url, retries=4, **kw):
             except requests.RequestException as ex:
                 r, err = None, ex
             _record(service, time.perf_counter() - t, r, err, op)
-        if attempt:
+        if attempt or rejected:
             _bump(service, "retries")
         if r is not None and r.status_code == 429:
             _bump(service, "rate_limited")
@@ -302,8 +317,12 @@ def request(service, method, url, retries=4, **kw):
                 _stats[service]["retry_after_max"] = max(_stats[service]["retry_after_max"], after)
             if after > LONG_PAUSE:
                 raise ServicePaused(service, after)
-            if sv.aligned:                            # their clock moved: re-learn where windows reset
-                sv.learn_reset(sent_at, after)
+            owner = _services[sv.budget[0]] if sv.budget else sv
+            if owner.aligned:                         # their clock moved / window full: re-learn where windows reset
+                owner.learn_reset(sent_at, after)
+                rejected += 1
+                if rejected > SCHEDULE_RETRIES:
+                    return r
                 continue
             if sv.window:                             # our clock and theirs disagree slightly: widen the margin
                 with sv.lock:
@@ -311,6 +330,7 @@ def request(service, method, url, retries=4, **kw):
                     sv.window = (cap, min(span + 0.5, sv.base_span + 3.0))
                     sv._persist()
             sv.hold_off(max(after, _backoff(attempt)))
+            attempt += 1
             continue
         if r is not None and r.status_code < 500:
             sv.fail_streak = 0
@@ -322,6 +342,9 @@ def request(service, method, url, retries=4, **kw):
             sv.fail_streak = 0
             _bump(service, "breaker_trips")
         time.sleep(_backoff(attempt))
+        attempt += 1
+    if last_err is None:                              # ran out of attempts on 429s
+        return r
     raise last_err
 
 

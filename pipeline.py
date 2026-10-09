@@ -5,8 +5,9 @@
 
 Order (stages that use different services overlap):
 
-  pull + official notes ──┬── clips + bass (Deezer, iTunes, ReccoBeats) ── calibration (ReccoBeats) ──────┐
-                          └── genres (MusicBrainz) ── dig ahead: new-song Deezer requests into cache ──────┴── fingerprint ── new songs ── artwork
+  pull + official notes ──┬── clips + bass (Deezer, iTunes, ReccoBeats) ── calibration (reused) ───────┐
+                          ├── genres (MusicBrainz) ── seed relationships (MusicBrainz) ─────────────────┼── fingerprint ── new songs ── artwork
+                          └── dig ahead: new-song Deezer answers + official lookups into cache ─────────┘
 
 Writes cache/metrics.json: per-stage times, and per-service request counts, retries, rate-limit hits,
 latency percentiles and cache hit rates.
@@ -49,7 +50,8 @@ def report(run):
         "status": P.read().get("status"),
     }
     out = net.write_metrics(meta)
-    inventory()
+    meta["complete"] = not inventory()                # False if any library song is still missing its analysis
+    net.write_metrics(meta)
     print(f"\n== Run {run['id']} ({run['mode']}, cache at start: {run['cache_at_start']}): "
           f"{wall / 60:.1f} min wall, {awake / 60:.1f} min awake ==")
     for k, v in meta["stages_s"].items():
@@ -76,11 +78,14 @@ def inventory():
     tracks, features, est = load("tracks.json", {}), load("features.json", {}), load("estimated_features.json", {})
     cands, measured = load("candidates.json", {}), load("song_measurements.json", {})
     now = {k: set(v) for k, v in net.ANALYSED.items()}
+    clips = {p.stem for p in (CACHE / "previews").glob("*") if p.suffix in (".mp3", ".m4a")}
     lib = {}
     for i in tracks:
         lib[i] = ("official numbers exist, no analysis needed" if i in features else
                   "analysed this run (no official numbers)" if i in now.get("library", ()) else
-                  "analysed on an earlier run, reused" if i in est else "no clip anywhere, cannot be analysed")
+                  "analysed on an earlier run, reused" if i in est else
+                  "ANALYSIS FAILED (clip on disk; retried next run)" if i in clips else
+                  "no clip anywhere, cannot be analysed")
     new = {}
     for cid, c in cands.items():
         if not c.get("measured"):
@@ -99,6 +104,11 @@ def inventory():
             summary[part][why] = summary[part].get(why, 0) + 1
     (CACHE / "analysis_inventory.json").write_text(_j.dumps({"summary": summary, "library": lib, "new_songs": new}, indent=1))
     print(f"  analysis inventory: {summary}")
+    failed = summary["library"].get("ANALYSIS FAILED (clip on disk; retried next run)", 0)
+    if failed:
+        print(f"  !! {failed} library songs are missing their analysis: this run is INCOMPLETE")
+        P.fact(f"{failed} songs couldn't be measured this time; the next run will retry them.", key="incomplete")
+    return failed
 
 
 def audio_then_calibration():
@@ -108,11 +118,17 @@ def audio_then_calibration():
     calibrate.main()                         # B1 tune the instruments
 
 
-def genres_then_dig_ahead():
+def genres_then_relations():
     import artist_genres
-    artist_genres.main()                     # B2 ask the clerks
+    artist_genres.main()                     # B2 ask the clerks (MusicBrainz)
     import candidates
-    candidates.prefetch()                    # B4's Deezer requests, while ReccoBeats is the bottleneck
+    candidates.warm_relations()              # B4's MusicBrainz relationships, as soon as identities exist
+    candidates.prefetch(use_relations=True)  # ...and the Deezer/official work for the collaborators they add
+
+
+def dig_ahead():
+    import candidates
+    candidates.prefetch()                    # B4's Deezer requests, from the start (Deezer is on the critical path)
 
 
 def main():
@@ -142,8 +158,9 @@ def main():
                 P.finish(k)
             P.fact("Picking up where we left off. Your records are already pulled.")
 
-        with ThreadPoolExecutor(max_workers=2) as side_by_side:
-            jobs = [side_by_side.submit(audio_then_calibration), side_by_side.submit(genres_then_dig_ahead)]
+        with ThreadPoolExecutor(max_workers=3) as side_by_side:
+            jobs = [side_by_side.submit(audio_then_calibration), side_by_side.submit(genres_then_relations),
+                    side_by_side.submit(dig_ahead)]
             for j in jobs:
                 j.result()                   # re-raises anything that went wrong in either branch
 

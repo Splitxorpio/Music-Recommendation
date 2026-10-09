@@ -113,7 +113,7 @@ def deezer_artist(name, isrcs):
 
 # ---------- stage 1: gather ----------
 
-def gather(enriched, features, isrc_map, profile):
+def gather(enriched, features, isrc_map, profile, use_relations=True):
     lib_isrcs, lib_names, known, share, by_artist = library(enriched, features, isrc_map)
     seeds = sorted(share, key=lambda a: -share[a])[:N_SEEDS]
     artist_links = defaultdict(list)   # deezer artist id -> [{via, type, strength}]
@@ -147,6 +147,8 @@ def gather(enriched, features, isrc_map, profile):
 
     def relations():
         out = {}
+        if not use_relations:                         # prefetch runs before artist identities exist
+            return out
         for s in seeds:
             if s not in mbids:
                 continue
@@ -453,17 +455,44 @@ def stage2(cands, profile):
     save_dz()
 
 
-def prefetch():
+_prefetch_lock = threading.Lock()
+
+
+def prefetch(use_relations=False):
     """Warm the Deezer cache with everything gather() will ask for, using only the song list.
     The pipeline runs this while clip analysis is waiting on ReccoBeats' slow lane; the real
-    gather() later reads the same requests from cache, so its result is unchanged."""
+    gather() later reads the same requests from cache, so its result is unchanged.
+    The two passes (from the start, and again once artist identities exist) take turns, so they never
+    both rewrite the remembered official lookups at once."""
     if (CACHE / "candidates.json").exists():
         return
+    with _prefetch_lock:
+        _prefetch(use_relations)
+
+
+def _prefetch(use_relations):
     tracks, features, isrc_map = load("tracks.json", {}), load("features.json", {}), load("isrc.json", {})
     P.stage("crates", label="artists followed")
-    ahead = gather(tracks, features, isrc_map, profile=None)
+    ahead = gather(tracks, features, isrc_map, profile=None, use_relations=use_relations)
     official_features(ahead)                          # their official-number lookups too (remembered by ISRC)
     print(f"[prefetch] Deezer answers and official lookups ready for {len(ahead)} candidates")
+
+
+def warm_relations():
+    """Fetch the seed artists' MusicBrainz relationships (and the Deezer searches for the related names)
+    as soon as artist identities are known, so the real gather() reads them from cache."""
+    tracks, features, isrc_map = load("tracks.json", {}), load("features.json", {}), load("isrc.json", {})
+    _, _, _, share, _ = library(tracks, features, isrc_map)
+    seeds = sorted(share, key=lambda a: -share[a])[:N_SEEDS]
+    mbids, rel_cache = load("artist_mbids.json", {}), load("mb_relations.json", {})
+    for s in seeds:
+        if s in mbids and mbids[s] not in rel_cache:
+            rel_cache[mbids[s]] = mb_get(f"artist/{mbids[s]}", {"inc": "artist-rels"}) or {}
+            save("mb_relations.json", rel_cache)
+    names = sorted({(r.get("artist") or {}).get("name") for s in seeds if s in mbids
+                    for r in rel_cache.get(mbids[s], {}).get("relations", [])} - {None})
+    fan(lambda o: dz("search/artist", q=o), names)
+    print(f"[relations] {len(seeds)} seed artists' relationships and {len(names)} related names ready")
 
 
 def main():
