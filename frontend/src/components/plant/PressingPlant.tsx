@@ -108,20 +108,7 @@ export function PressingPlant({ initial }: { initial: PipelineStatus }) {
           </ul>
         </div>
         <div className="deck" aria-hidden="true">
-          <div className="plinth">
-            <span className="plinth-brand mono">Frequency · model 33</span>
-            <div className="platter">
-              <div className={`record${playing && !REDUCED ? " spinning" : ""}`} id="pl-record"><div className="grooves"></div><div className="label" id="pl-label"><span>side a</span><b>Frequency</b><span>33⅓</span></div></div>
-              <div className="sheen"></div>
-            </div>
-            {/* needle rests off the record until a run starts, then tracks inward with progress */}
-            <svg className="tonearm" id="pl-arm" viewBox="0 0 120 360" style={{ transform: `rotate(${status === "idle" || status === "paused" || status === "error" ? -9 : 12 + frac * 20}deg)` }}>
-              <circle cx="60" cy="40" r="26" className="arm-base" /><circle cx="60" cy="40" r="9" className="arm-pivot" />
-              <path d="M60 40 L60 250 Q60 292 40 318" className="arm-tube" /><rect x="26" y="306" width="30" height="40" rx="4" transform="rotate(28 41 326)" className="arm-head" />
-            </svg>
-            <div className="knob"><i></i></div>
-            <span className={`led${playing ? " on" : ""}`} id="pl-led"></span><span className="speed mono">33 · 45</span>
-          </div>
+          <Turntable playing={playing} resting={status === "idle" || status === "paused" || status === "error"} frac={frac} />
           <div className="deck-character" id="pl-char"><Character name={want} /></div>
         </div>
         <aside className="sleeve-back" aria-label="Analysis stages">
@@ -230,5 +217,75 @@ function Tracklist({ st, status }: { st: PipelineStatus; status: PlantStatus }) 
         ];
       })}
     </>
+  );
+}
+
+/* ---------------------------------------------------------------- turntable */
+// One drawing with shared coordinates, so the record is always a perfect circle that fits the player
+// box, and the needle tip is computed to sit on the grooves. Only the label layer rotates (the grooves
+// look identical at every angle, like a real record), so the spin stays smooth.
+const DECK = { w: 560, h: 500, cx: 236, cy: 250, platter: 214, record: 204, label: 66 };
+const PIVOT = { x: 494, y: 76 };
+const ARM = 252;                                   // pivot -> needle tip
+const GROOVE_OUT = 192, GROOVE_IN = 82, REST = 236; // needle radius from the record's centre
+
+function needleAngle(r: number) {
+  // the tip sits where the circle of radius r (around the record) meets the arm's reach (around the pivot)
+  const dx = DECK.cx - PIVOT.x, dy = DECK.cy - PIVOT.y, d = Math.hypot(dx, dy);
+  const toCentre = Math.atan2(dy, dx);
+  const spread = Math.acos(clamp((ARM * ARM + d * d - r * r) / (2 * ARM * d), -1, 1));
+  return ((toCentre - spread) * 180) / Math.PI;
+}
+
+const GROOVES = Array.from({ length: 34 }, (_, i) => DECK.label + 10 + i * ((DECK.record - DECK.label - 14) / 33));
+
+function Turntable({ playing, resting, frac }: { playing: boolean; resting: boolean; frac: number }) {
+  const r = resting ? REST : GROOVE_OUT - clamp(frac) * (GROOVE_OUT - GROOVE_IN);
+  const { cx, cy } = DECK;
+  return (
+    <svg className="deck-svg" viewBox={`0 0 ${DECK.w} ${DECK.h}`} role="presentation">
+      <defs>
+        <linearGradient id="plinth-wood" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#2a2622" /><stop offset="0.6" stopColor="#1a1815" /><stop offset="1" stopColor="#1c1a17" />
+        </linearGradient>
+        <radialGradient id="vinyl-sheen" cx="0.35" cy="0.3" r="0.8">
+          <stop offset="0" stopColor="#fff" stopOpacity="0.07" /><stop offset="0.5" stopColor="#fff" stopOpacity="0" />
+        </radialGradient>
+      </defs>
+      <rect className="deck-body" x="1" y="1" width={DECK.w - 2} height={DECK.h - 2} rx="14" fill="url(#plinth-wood)" />
+      <text className="deck-brand" x={DECK.w - 22} y={DECK.h - 18}>FREQUENCY · MODEL 33</text>
+
+      <circle cx={cx} cy={cy} r={DECK.platter + 6} className="deck-platter-rim" />
+      <circle cx={cx} cy={cy} r={DECK.platter} className="deck-platter" />
+      <g className="vinyl">
+        <circle cx={cx} cy={cy} r={DECK.record} className="deck-record" />
+        {GROOVES.map((gr, i) => <circle key={i} cx={cx} cy={cy} r={gr} className="deck-groove" />)}
+        <g className={`deck-spin${playing ? " spinning" : ""}`} style={{ transformOrigin: `${cx}px ${cy}px` }}>
+          {/* faint marks in the grooves so the turning is visible */}
+          <circle cx={cx} cy={cy} r={150} className="deck-mark" strokeDasharray="22 90 6 140" />
+          <circle cx={cx} cy={cy} r={112} className="deck-mark" strokeDasharray="40 200" />
+          <circle cx={cx} cy={cy} r={DECK.label} className="deck-label" />
+          <text x={cx} y={cy - 28} className="deck-label-small">SIDE A</text>
+          <text x={cx} y={cy + 28} className="deck-label-big">FREQUENCY</text>
+          <text x={cx} y={cy + 46} className="deck-label-small">33⅓</text>
+          <circle cx={cx} cy={cy} r={4.5} className="deck-spindle" />
+        </g>
+        <circle cx={cx} cy={cy} r={DECK.record} fill="url(#vinyl-sheen)" pointerEvents="none" />
+      </g>
+
+      <circle cx={PIVOT.x} cy={PIVOT.y} r={30} className="arm-base" />
+      <g className="deck-arm" style={{ transform: `translate(${PIVOT.x}px, ${PIVOT.y}px) rotate(${needleAngle(r)}deg)` }}>
+        <circle cx={-34} cy={0} r={15} className="arm-weight" />
+        <path d={`M-20 0 L${ARM - 34} 0`} className="arm-tube" />
+        <path d={`M${ARM - 40} -9 L${ARM + 4} -9 L${ARM + 4} 9 L${ARM - 40} 9 Z`} className="arm-head" />
+        <circle cx={ARM} cy={0} r={2.6} className="arm-needle" />
+      </g>
+      <circle cx={PIVOT.x} cy={PIVOT.y} r={10} className="arm-pivot" />
+
+      <circle cx={DECK.w - 58} cy={DECK.h - 70} r={24} className="deck-knob" />
+      <line x1={DECK.w - 58} y1={DECK.h - 90} x2={DECK.w - 58} y2={DECK.h - 78} className="deck-knob-mark" />
+      <circle cx={DECK.w - 120} cy={DECK.h - 66} r={4.5} className={`deck-led${playing ? " on" : ""}`} />
+      <text x={DECK.w - 132} y={DECK.h - 46} className="deck-speed">33 · 45</text>
+    </svg>
   );
 }

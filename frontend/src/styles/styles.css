@@ -612,35 +612,33 @@ body.pressing > .masthead, body.pressing > main, body.pressing > .colophon { dis
 
 /* deck */
 .deck { position: relative; justify-self: center; width: min(100%, 520px); }
-.plinth {
-  position: relative; aspect-ratio: 1.12; border-radius: 10px; padding: 7%;
-  background: linear-gradient(160deg, #2a2622, #1a1815 60%), #1c1a17;
-  box-shadow: 0 1px 0 rgb(255 255 255 / .07) inset, 0 50px 90px -30px rgb(0 0 0 / .9), 0 0 0 1px #34302b;
-}
-.plinth::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: repeating-linear-gradient(90deg, rgb(255 255 255 / .015) 0 1px, transparent 1px 4px); pointer-events: none; }
-.plinth-brand { position: absolute; left: 38%; bottom: 4%; font-size: 9.5px; color: var(--mute-2); }
-.platter { position: relative; width: 78%; aspect-ratio: 1; border-radius: 50%; background: #0c0b0a; box-shadow: 0 0 0 6px #23201c, 0 12px 30px rgb(0 0 0 / .6); }
-.record { position: absolute; inset: 3%; border-radius: 50%; }
-.record .grooves { position: absolute; inset: 0; border-radius: 50%; background: repeating-radial-gradient(circle, #121110 0 1.6px, #1d1b19 2px 3px); }
-.record .label {
-  position: absolute; inset: 33%; border-radius: 50%; background: rgb(var(--amb)); transition: background 1.6s;
-  display: grid; place-content: center; text-align: center; color: var(--ink); box-shadow: inset 0 0 0 3px rgb(0 0 0 / .12);
-}
-.record .label::after { content: ""; position: absolute; left: 50%; top: 50%; width: 7%; height: 7%; margin: -3.5% 0 0 -3.5%; border-radius: 50%; background: #0c0b0a; }
-.record .label b { font-weight: 800; font-size: clamp(10px, 1.1vw, 15px); text-transform: uppercase; letter-spacing: -.02em; }
-.record .label span { font-family: var(--f-mono); font-size: 8px; letter-spacing: .14em; text-transform: uppercase; }
-.record.spinning { animation: spin 1.8s linear infinite; }
-.platter .sheen { position: absolute; inset: 3%; border-radius: 50%; pointer-events: none; background: conic-gradient(from 30deg, transparent 0 12%, rgb(255 255 255 / .07) 18%, transparent 26% 62%, rgb(255 255 255 / .05) 68%, transparent 76%); }
-.tonearm { position: absolute; right: 2%; top: 4%; width: 24%; height: auto; transform-origin: 50% 11.1%; transform: rotate(-9deg); transition: transform 1.6s var(--ease); filter: drop-shadow(0 10px 10px rgb(0 0 0 / .5)); }
+/* the turntable is one SVG (see Turntable in PressingPlant.tsx): it scales as a whole, so the record stays round */
+.deck-svg { display: block; width: 100%; height: auto; overflow: visible; filter: drop-shadow(0 40px 60px rgb(0 0 0 / .6)); }
+.deck-body { stroke: #34302b; stroke-width: 2; }
+.deck-brand { font-family: var(--f-mono); font-size: 11px; letter-spacing: .08em; fill: var(--mute-2); text-anchor: end; }
+.deck-platter-rim { fill: #23201c; }
+.deck-platter { fill: #0c0b0a; }
+.deck-record { fill: #151413; }
+.deck-groove { fill: none; stroke: #1f1d1b; stroke-width: 1.4; }
+.deck-mark { fill: none; stroke: #f3ede1; stroke-opacity: .07; stroke-width: 3; }
+.deck-label { fill: rgb(var(--amb)); transition: fill 1.6s; }
+.deck-label-small { font-family: var(--f-mono); font-size: 9px; letter-spacing: .16em; fill: var(--ink); text-anchor: middle; }
+.deck-label-big { font-family: var(--f-sans); font-weight: 800; font-size: 17px; letter-spacing: -.02em; fill: var(--ink); text-anchor: middle; }
+.deck-spindle { fill: #0c0b0a; }
+.deck-spin { will-change: transform; }
+.deck-spin.spinning { animation: spin 1.8s linear infinite; }                 /* 33⅓ rpm */
+.deck-arm { transition: transform 1.6s var(--ease); }
 .arm-base { fill: #2f2b26; stroke: #46413a; stroke-width: 2; }
 .arm-pivot { fill: var(--cream); }
+.arm-weight { fill: #3a352f; stroke: #57514a; stroke-width: 1.5; }
 .arm-tube { fill: none; stroke: var(--cream); stroke-width: 7; stroke-linecap: round; }
 .arm-head { fill: var(--paper); }
-.knob { position: absolute; right: 9%; bottom: 10%; width: 11%; aspect-ratio: 1; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #5b554c, #1e1c19); box-shadow: 0 4px 10px rgb(0 0 0 / .6); }
-.knob i { position: absolute; left: 50%; top: 10%; width: 2px; height: 30%; background: var(--cream); transform: translateX(-50%); }
-.led { position: absolute; right: 24%; bottom: 13%; width: 7px; height: 7px; border-radius: 50%; background: #3a352f; transition: background .4s, box-shadow .4s; }
-.led.on { background: var(--acid); box-shadow: 0 0 10px var(--acid); }
-.speed { position: absolute; right: 22%; bottom: 7%; font-size: 9px; color: var(--mute-2); }
+.arm-needle { fill: var(--acid); }
+.deck-knob { fill: #2c2824; stroke: #4a453e; stroke-width: 1.5; }
+.deck-knob-mark { stroke: var(--cream); stroke-width: 2.5; stroke-linecap: round; }
+.deck-led { fill: #3a352f; transition: fill .4s; }
+.deck-led.on { fill: var(--acid); filter: drop-shadow(0 0 5px var(--acid)); }
+.deck-speed { font-family: var(--f-mono); font-size: 10px; fill: var(--mute-2); }
 .deck-character { position: absolute; left: -12%; bottom: -10%; width: 32%; --c-a: var(--acid); --c-b: var(--cream); z-index: 2; }
 
 /* sleeve back */
@@ -678,8 +676,7 @@ body.pressing > .masthead, body.pressing > main, body.pressing > .colophon { dis
 /* states */
 .plant[data-status="idle"] .plant-title .l2, .plant[data-status="paused"] .plant-title .l2 { color: var(--lavender); }
 .plant[data-status="error"] .plant-title .l2 { color: var(--coral); }
-.plant.lifting .record { animation: lift 1.6s var(--ease) forwards; }
-.plant.lifting .tonearm { transform: rotate(-9deg) !important; }
+.plant.lifting .vinyl { animation: lift 1.6s var(--ease) forwards; transform-box: fill-box; transform-origin: center; }
 .plant.lifting { opacity: 0; }
 @keyframes lift { 0% { transform: none; } 40% { transform: translateY(-6%) scale(1.04); } 100% { transform: translateY(-40%) scale(1.6) rotate(200deg); opacity: 0; } }
 
