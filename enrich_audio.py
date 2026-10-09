@@ -427,6 +427,9 @@ def main():
     P.stage("previews")
     itunes = load("itunes_matches.json", {})
     deezer = step_deezer(tracks, itunes)
+    # Saved matches can include songs that have since left the library (they're kept in case they return);
+    # every later step works only on songs in the current library.
+    deezer = {i: m for i, m in deezer.items() if i in tracks}
     rescued = {}
     for i in deezer:
         if i not in features:
@@ -435,7 +438,7 @@ def main():
         a, n = max(rescued.items(), key=lambda x: x[1])
         P.fact(f"Deezer had {n} {a} songs nobody else had", key="rescued")
     itunes = step_match({i: t for i, t in tracks.items() if i not in deezer})
-    matches = {**itunes, **deezer}
+    matches = {i: m for i, m in {**itunes, **deezer}.items() if i in tracks}
     P.fact(f"Found 30-second clips for {len(matches)} of {len(tracks)} songs")
     P.finish("previews")
     est, bass = step_audio(tracks, features, matches)
