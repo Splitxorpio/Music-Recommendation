@@ -309,6 +309,7 @@ class Handler(BaseHTTPRequestHandler):
         host = urlparse(url).hostname or ""
         if host not in IMG_HOSTS and not host.endswith(".mzstatic.com"):
             return self.send(400, b"host not allowed", "text/plain")
+        IMG.mkdir(parents=True, exist_ok=True)      # the cache may have been cleared while the server runs
         f = IMG / (hashlib.md5(url.encode()).hexdigest() + ".jpg")
         if not f.exists():
             try:

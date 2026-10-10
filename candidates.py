@@ -339,9 +339,10 @@ def candidate_genres(chosen, mbids, genres):
     need = [c for c in chosen if c["artist"] not in genres]
     if not need:
         return
-    missing = resolve_isrcs([([c["artist"]], c["isrc"]) for c in need], mbids)
+    # runs in the background during the new-songs stage: it must not overwrite that stage's counter
+    missing = resolve_isrcs([([c["artist"]], c["isrc"]) for c in need], mbids, report=False)
     known = {c["artist"]: mbids[c["artist"]] for c in need if c["artist"] in mbids}
-    genres_for(known, genres)
+    genres_for(known, genres, report=False)
     for name in missing:
         genres.setdefault(name, {})
 

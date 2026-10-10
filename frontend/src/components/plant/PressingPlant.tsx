@@ -38,6 +38,7 @@ export function PressingPlant({ initial }: { initial: PipelineStatus }) {
   useEffect(() => collect(initial), [collect, initial]);
 
   const p = st.progress, stages = st.stages;
+  const [broken, setBroken] = useState<Set<string>>(() => new Set());   // covers that failed to load leave the crate
   const status = plantStatus(st, finishing);
   const frac = status === "done" ? 1 : overall(p, stages);
   const playing = status === "running";
@@ -120,9 +121,10 @@ export function PressingPlant({ initial }: { initial: PipelineStatus }) {
       <div className="crate-wrap">
         <p className="mono crate-label" id="pl-crate-label">{seenCount ? `the crate · ${seenCount} sleeves so far` : "the crate · empty until your songs turn up"}</p>
         <div className="plant-crate" id="pl-crate">
-          {crate.map((c) => (
+          {crate.filter((c) => !broken.has(c.url)).map((c) => (
             <figure key={c.url} className="crate-cover" style={vars({ "--r": c.r })}>
-              <img src={img(c.url)} alt={`${c.title} by ${c.artist}`} />
+              <img src={img(c.url)} alt={`${c.title} by ${c.artist}`}
+                   onError={() => setBroken((b) => new Set(b).add(c.url))} />
               {c.tag ? <span className="sticker known">{c.tag}</span> : null}
               <figcaption className="mono">{c.title}<br /><span>{c.artist}</span></figcaption>
             </figure>

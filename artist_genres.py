@@ -56,7 +56,7 @@ def _credit_match(names, credits, mbids):
                 mbids[name] = a["id"]
 
 
-def resolve_isrcs(items, mbids):
+def resolve_isrcs(items, mbids, report=True):
     """items: [(artist names, isrc)]. Resolves names -> MBIDs in batches; returns names still unknown."""
     todo = [(names, code) for names, code in items if code and any(n not in mbids for n in names)]
     codes = sorted({c for _, c in todo})
@@ -70,7 +70,8 @@ def resolve_isrcs(items, mbids):
         for names, code in todo:
             for credits in by_code.get(code, [])[:3]:
                 _credit_match(names, credits, mbids)
-        P.tick(len(mbids), now=f"asking who made {min(k + ISRC_BATCH, len(codes))} of {len(codes)} recordings")
+        if report:
+            P.tick(len(mbids), now=f"asking who made {min(k + ISRC_BATCH, len(codes))} of {len(codes)} recordings")
     return {n for names, _ in todo for n in names if n not in mbids}
 
 
@@ -157,7 +158,7 @@ def genre_vocabulary():
     return _vocab
 
 
-def genres_for(name_to_mbid, genres):
+def genres_for(name_to_mbid, genres, report=True):
     """Fill genres[name] for every name not already known, 100 artists per request."""
     todo = [n for n in name_to_mbid if n not in genres]
     if not todo:
@@ -175,7 +176,8 @@ def genres_for(name_to_mbid, genres):
             if genres[n]:
                 top = [x for x, _ in sorted(genres[n].items(), key=lambda x: -x[1])[:3]]
                 P.fact(f"{n}: {' / '.join(top)}", key="clerk")
-        P.tick(min(k + ARTIST_BATCH, len(todo)), len(todo), label="artists described")
+        if report:
+            P.tick(min(k + ARTIST_BATCH, len(todo)), len(todo), label="artists described")
     return genres
 
 
