@@ -28,6 +28,13 @@ _store = None
 _legacy_time = 0.0
 _last_save = time.time()
 SAVE_EVERY_S = 20            # answers are written out regularly, so a killed run keeps what it fetched
+_backend = None              # optional shared store (frequency.provider_cache.DeezerBackend); None = the JSON file
+
+
+def install_backend(backend):
+    """Keep answers in a shared store (get(key) -> {"t", "v"} | None, put(key, value, ttl_s)) instead of the file."""
+    global _backend
+    _backend = backend
 
 
 def ttl(key, value):
@@ -54,6 +61,8 @@ def _load():
 
 
 def save():
+    if _backend:
+        return                                        # the shared store is written answer by answer
     with _lock:
         snapshot = dict(_load())
     tmp = FILE.with_suffix(".tmp")
@@ -70,8 +79,11 @@ def get(path, fresh=False, **params):
     fresh=True always asks Deezer (and refreshes the store)."""
     k = key_of(path, params)
     if not fresh:
-        with _lock:
-            rec = _load().get(k)
+        if _backend:
+            rec = _backend.get(k)
+        else:
+            with _lock:
+                rec = _load().get(k)
         if rec and time.time() - rec["t"] < ttl(k, rec["v"]):
             net.cache_hit("deezer_fresh_in_store")
             return rec["v"]
@@ -80,6 +92,9 @@ def get(path, fresh=False, **params):
             net.cache_hit("deezer_expired_refetched")
     global _last_save
     v = net.once(("deezer", k), lambda: net.deezer_json(path, **params))
+    if _backend:
+        _backend.put(k, v, ttl(k, v))
+        return v
     with _lock:
         _load()[k] = {"t": time.time(), "v": v}
         due = time.time() - _last_save > SAVE_EVERY_S
@@ -108,6 +123,8 @@ def track_with_preview(path):
 def freshness():
     """Counts of stored answers by state, for the run report."""
     now = time.time()
+    if _backend:
+        return {"shared_store": True}
     with _lock:
         store = dict(_load())
     out = {"fresh": 0, "stale": 0, "legacy_untimed": 0}

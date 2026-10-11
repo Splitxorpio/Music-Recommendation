@@ -71,7 +71,7 @@ def itunes_search(params):
     for attempt in range(5):
         r = net.get("itunes", ITUNES, params=params)
         if r.status_code in (403, 429):
-            net._services["itunes"].hold_off(10 * (attempt + 1))
+            net.hold_off("itunes", 10 * (attempt + 1))
             continue
         r.raise_for_status()
         return r.json()

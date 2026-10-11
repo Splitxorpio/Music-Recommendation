@@ -9,6 +9,7 @@ Also: pmap() for controlled fan-out, once() to coalesce identical in-flight work
 Spotify is the exception: it goes through spotify_auth (spotipy), one call at a time.
 """
 import json
+import os
 import random
 import re
 import threading
@@ -90,7 +91,9 @@ class _Service:
             t = max(now, start + a["after_reset"])
             if self.win_counts.get(k, 0) + cost <= cap + 1e-9 and t <= start + period - a["end_guard"]:
                 self.win_counts[k] = self.win_counts.get(k, 0) + cost
-                for old in [w for w in self.win_counts if w < k - 1]:
+                # forget windows that have closed (relative to now: booking ahead must not drop the open window's count)
+                k_now = int((now - a["phase"]) // period)
+                for old in [w for w in self.win_counts if w < k_now - 1]:
                     del self.win_counts[old]
                 return t
             k += 1
@@ -110,6 +113,17 @@ class _Service:
             self._persist()
 
     def take_turn(self, cost=1.0):
+        if _scheduler and self.name in _scheduler.buckets:
+            # Multi-process mode: the shared scheduler (PostgreSQL) decides when this request may start.
+            try:
+                at = _scheduler.take_turn(self.name)
+            except Exception as ex:
+                if type(ex).__name__ == "QuotaWait":
+                    raise ServicePaused(self.name, int(ex.seconds)) from ex
+                raise
+            if self.aligned or self.budget is None and self.window:
+                self.log.append(time.time())
+            return at
         if self.budget:                                # book into another service's windows (shared allowance)
             owner, unit = self.budget
             return _services[owner].take_turn(unit)
@@ -181,6 +195,16 @@ class _Service:
 
 
 _services = {k: _Service(k, **v) for k, v in SERVICES.items()}
+
+# Optional cross-process scheduler (frequency.quota.Scheduler). None = this process paces itself, as the
+# single-user pipeline always has.
+_scheduler = None
+
+
+def install_scheduler(scheduler):
+    """Route pacing for the services the scheduler knows through it (used by the multi-user worker)."""
+    global _scheduler
+    _scheduler = scheduler
 
 # ------------------------------------------------------------------ metrics
 _mlock = threading.Lock()
@@ -289,10 +313,21 @@ def _backoff(attempt):
 SCHEDULE_RETRIES = 12      # windowed services: a 429 is a scheduling signal, retried on its own budget
 
 
+# Test-only: send every provider request to a local fake (tests/fakes/providers.py) instead of the real host.
+_TEST_PROVIDER = os.environ.get("FREQUENCY_TEST_PROVIDER_URL")
+
+
+def _test_url(url):
+    u = urlparse(url)
+    return f"{_TEST_PROVIDER}/{u.netloc}{u.path}" + (f"?{u.query}" if u.query else "")
+
+
 def request(service, method, url, retries=4, **kw):
     """One request through the controller. Returns the Response (including 4xx, for the caller to
     judge). Raises ServicePaused for a long Retry-After, or the last network error after retries."""
     sv = _services[service]
+    if _TEST_PROVIDER:
+        url = _test_url(url)
     op = _op(service, url)
     last_err = None
     attempt, rejected = 0, 0
@@ -315,9 +350,22 @@ def request(service, method, url, retries=4, **kw):
             after = int(r.headers.get("Retry-After") or 0)
             with _mlock:
                 _stats[service]["retry_after_max"] = max(_stats[service]["retry_after_max"], after)
+            shared = _scheduler and service in _scheduler.buckets
             if after > LONG_PAUSE:
+                if shared:
+                    _scheduler.block(service, after)          # every process stops, not just this one
                 raise ServicePaused(service, after)
             owner = _services[sv.budget[0]] if sv.budget else sv
+            if shared:
+                if owner.aligned:
+                    _scheduler.learn_reset(service, sent_at, after)
+                    rejected += 1
+                    if rejected > SCHEDULE_RETRIES:
+                        return r
+                    continue
+                _scheduler.block(service, max(after, _backoff(attempt)))
+                attempt += 1
+                continue
             if owner.aligned:                         # their clock moved / window full: re-learn where windows reset
                 owner.learn_reset(sent_at, after)
                 rejected += 1
@@ -348,6 +396,14 @@ def request(service, method, url, retries=4, **kw):
     raise last_err
 
 
+def hold_off(service, seconds):
+    """Ask everyone using `service` to pause: all processes when a shared scheduler is installed, else this one."""
+    if _scheduler and service in _scheduler.buckets:
+        _scheduler.block(service, seconds)
+    else:
+        _services[service].hold_off(seconds)
+
+
 def get(service, url, **kw):
     return request(service, "GET", url, **kw)
 
@@ -369,7 +425,10 @@ def deezer_json(path, **params):
             return j
         if err.get("code") == 4:                      # quota exceeded: slow the whole service down
             _bump("deezer", "rate_limited")
-            _services["deezer"].hold_off(2 + _backoff(attempt))
+            if _scheduler and "deezer" in _scheduler.buckets:
+                _scheduler.block("deezer", 2 + _backoff(attempt))
+            else:
+                _services["deezer"].hold_off(2 + _backoff(attempt))
             continue
         return None
     return None

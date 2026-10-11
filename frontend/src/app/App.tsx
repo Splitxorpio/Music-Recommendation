@@ -1,8 +1,9 @@
 // Boot: if nothing has been analysed yet (or a run is going), show the pressing plant; otherwise the dashboard.
+// On the multi-user server, first sign in, and pick a listening source if there's none yet.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { assignThemes, makeWorldOf } from "../lib/themes";
 import { issueDate } from "../lib/util";
-import { getPipeline, getProfile, startPipeline } from "../services/api";
+import { AuthRequired, getPipeline, getProfile, startPipeline } from "../services/api";
 import type { PipelineStatus, Profile } from "../types/api";
 import { WorldContext } from "../components/common/WorldContext";
 import { TooltipProvider } from "../components/common/Tooltip";
@@ -13,22 +14,27 @@ import { Masthead } from "../components/layout/Masthead";
 import { Notes } from "../components/notes/Notes";
 import { PressingPlant } from "../components/plant/PressingPlant";
 import { Worlds } from "../components/worlds/Worlds";
+import { AccountBar, SignIn, Sources } from "../components/account/Account";
 
-type View = { kind: "booting" } | { kind: "failed" } | { kind: "plant"; st: PipelineStatus } | { kind: "dashboard"; profile: Profile };
+type View = { kind: "booting" } | { kind: "failed" } | { kind: "signin" } | { kind: "sources"; st: PipelineStatus }
+  | { kind: "plant"; st: PipelineStatus } | { kind: "dashboard"; profile: Profile; st: PipelineStatus };
 
 export function App() {
   const [view, setView] = useState<View>({ kind: "booting" });
+  const [boot, setBoot] = useState(0);
+  const reboot = useCallback(() => setBoot((n) => n + 1), []);
 
   useEffect(() => {
     let live = true;
     (async () => {
       const st = await getPipeline();
+      if (st.needs_source && !st.running) return live && setView({ kind: "sources", st });
       if (!st.ready || st.running) return live && setView({ kind: "plant", st });
       const profile = await getProfile();
-      if (live) setView({ kind: "dashboard", profile });
-    })().catch(() => live && setView({ kind: "failed" }));
+      if (live) setView({ kind: "dashboard", profile, st });
+    })().catch((e) => live && setView(e instanceof AuthRequired ? { kind: "signin" } : { kind: "failed" }));
     return () => { live = false; };
-  }, []);
+  }, [boot]);
 
   const redig = useCallback(async () => {
     const st = await startPipeline(true);
@@ -39,7 +45,12 @@ export function App() {
     <TooltipProvider>
       <SvgDefs />
       {view.kind === "plant" ? <PressingPlant initial={view.st} />
-        : view.kind === "dashboard" ? <Dashboard profile={view.profile} onRedig={redig} />
+        : view.kind === "dashboard" ? <>
+            {view.st.account && <AccountBar st={view.st} onSources={() => setView({ kind: "sources", st: view.st })} onSignedOut={reboot} />}
+            <Dashboard profile={view.profile} onRedig={redig} />
+          </>
+        : view.kind === "signin" ? <SignIn onDone={reboot} />
+        : view.kind === "sources" ? <Sources st={view.st} onStarted={reboot} onSignedOut={reboot} />
         : <Shell failed={view.kind === "failed"} />}
     </TooltipProvider>
   );

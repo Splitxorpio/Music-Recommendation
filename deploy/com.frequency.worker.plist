@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Keeps one Frequency worker running (start more with copies under other labels). Replace REPO.
+     caffeinate -i keeps the Mac from idle-sleeping while the worker runs (a closed lid on battery still sleeps). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.frequency.worker</string>
+  <key>WorkingDirectory</key><string>REPO</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/bin/caffeinate</string><string>-i</string>
+         <string>REPO/.venv/bin/python</string><string>-m</string><string>frequency.worker</string>
+         <string>--measure-threads</string><string>3</string><string>--pipeline-slots</string><string>2</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ExitTimeOut</key><integer>90</integer>
+  <key>StandardOutPath</key><string>REPO/data/logs/worker.log</string>
+  <key>StandardErrorPath</key><string>REPO/data/logs/worker.log</string>
+</dict>
+</plist>

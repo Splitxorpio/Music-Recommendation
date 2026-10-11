@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Keeps the Frequency web server running. Install: see docs/DEPLOYMENT.md. Replace REPO with the project path. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.frequency.api</string>
+  <key>WorkingDirectory</key><string>REPO</string>
+  <key>ProgramArguments</key>
+  <array><string>REPO/.venv/bin/python</string><string>-m</string><string>frequency.api</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>REPO/data/logs/api.log</string>
+  <key>StandardErrorPath</key><string>REPO/data/logs/api.log</string>
+</dict>
+</plist>

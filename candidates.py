@@ -113,7 +113,9 @@ def deezer_artist(name, isrcs):
 
 # ---------- stage 1: gather ----------
 
-def gather(enriched, features, isrc_map, profile, use_relations=True):
+def gather(enriched, features, isrc_map, profile, use_relations=True, mbids=None, rel_cache=None, recco_cache=None):
+    """mbids / rel_cache / recco_cache: pass dicts to use another store (the multi-user worker reads them from
+    PostgreSQL and saves what this adds); None reads the cache files, as the single-user pipeline does."""
     lib_isrcs, lib_names, known, share, by_artist = library(enriched, features, isrc_map)
     seeds = sorted(share, key=lambda a: -share[a])[:N_SEEDS]
     artist_links = defaultdict(list)   # deezer artist id -> [{via, type, strength}]
@@ -142,8 +144,9 @@ def gather(enriched, features, isrc_map, profile, use_relations=True):
     P.fact(f"Starting from your top {len(seeds)}: {', '.join(seeds[:4])}…")
 
     # MusicBrainz relationships run in the background (their own 1/s limit) while Deezer works.
-    mbids = load("artist_mbids.json", {})
-    rel_cache = load("mb_relations.json", {})       # artist relationships barely change: keep them
+    mbids = load("artist_mbids.json", {}) if mbids is None else mbids
+    if rel_cache is None:
+        rel_cache = load("mb_relations.json", {})   # artist relationships barely change: keep them
 
     def relations():
         out = {}
@@ -238,7 +241,8 @@ def gather(enriched, features, isrc_map, profile, use_relations=True):
 
     # Minor source: ReccoBeats sound-alikes, seeded per sub-taste with its most-played official songs
     # (needs the fingerprint, so a prefetch run without a profile skips it)
-    recco_cache = load("recco_suggestions.json", {})   # random per call, like radio: kept for a day
+    if recco_cache is None:
+        recco_cache = load("recco_suggestions.json", {})   # random per call, like radio: kept for a day
 
     def recco(cl):
         ids = sorted((i for i, v in profile["track_clusters"].items()

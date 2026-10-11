@@ -19,7 +19,10 @@ from config import CACHE
 # How much each listening signal counts. Recent favourites count most, but saved and
 # long-term songs still contribute; a song in several lists adds up.
 SOURCE_WEIGHT = {"top_short_term": 3.0, "top_medium_term": 2.0, "top_long_term": 1.5,
-                 "recent": 1.5, "saved": 1.0}
+                 "recent": 1.5, "saved": 1.0,
+                 # the same five tiers for the other listening sources (multi-user backend, frequency/sources)
+                 "top_7day": 3.0, "top_1month": 2.0, "top_12month": 1.5, "recent_scrobbles": 1.5, "loved": 1.0,
+                 "history_90d": 3.0, "history_365d": 2.0, "history_all": 1.5, "history_frequent": 1.0}
 
 CLUSTER_FEATURES = ["energy", "danceability", "valence", "acousticness", "speechiness",
                     "instrumentalness", "loudness", "tempo_feel", "low_end_share"]
@@ -95,8 +98,8 @@ def correct_estimate(i, f, calibration):
     return f
 
 
-def build_rows(enriched):
-    calibration = load("calibration_model.json", {})
+def build_rows(enriched, calibration=None):
+    calibration = load("calibration_model.json", {}) if calibration is None else calibration
     rows = []
     for i, t in enriched.items():
         f = t["features"]
@@ -174,20 +177,21 @@ def score_track(features, low_end_share, profile):
     return {"score": best[0], "cluster": best[1]}
 
 
-def main():
-    P.stage("fingerprint")
-    raw = load("enriched.json", {})
+def build_profile(raw, artist_genres, calibration=None):
+    """The fingerprint for one library: raw = {song id: {name, artists, sources, feature_source, features, bass}}.
+    calibration=None reads cache/calibration_model.json; {} means estimates arrive already corrected."""
     enriched = merge_duplicates(raw)
     print(f"  merged {len(raw) - len(enriched)} duplicate releases")
-    artist_genres = load("artist_genres.json", {})
-    rows = build_rows(enriched)
+    rows = build_rows(enriched, calibration)
     w = np.array([r["weight"] for r in rows])
     X = np.array([[r[f] if r[f] is not None else np.nan for f in CLUSTER_FEATURES] for r in rows], dtype=float)
 
     # Fill the few missing values (e.g. no bass clip) with the weighted median.
     for j in range(X.shape[1]):
         miss = np.isnan(X[:, j])
-        if miss.any():
+        if miss.all():
+            X[:, j] = 0.0                              # no song has this trait (e.g. no clips at all): it can't split groups
+        elif miss.any():
             X[miss, j] = wquantile(X[~miss, j], w[~miss], 0.5)
 
     mean = np.average(X, axis=0, weights=w)
@@ -241,7 +245,7 @@ def main():
     remap = {int(c): n for n, c in enumerate(order)}
 
     all_idx = list(range(len(rows)))
-    profile = {
+    return {
         "source_weights": SOURCE_WEIGHT,
         "coverage": {"tracks": len(enriched), "with_traits": len(rows),
                      "estimated": sum(r["estimated"] for r in rows),
@@ -256,6 +260,12 @@ def main():
         "track_clusters": {r["id"]: {"cluster": remap[int(labels[k])], "weight": r["weight"]}
                            for k, r in enumerate(rows)},
     }
+
+
+def main():
+    P.stage("fingerprint")
+    profile = build_profile(load("enriched.json", {}), load("artist_genres.json", {}))
+    clusters, rows_n = profile["clusters"], profile["coverage"]["with_traits"]
     (CACHE / "profile.json").write_text(json.dumps(profile, indent=1))
     P.fact(f"You have {len(clusters)} worlds: " + "; ".join(c["name"] for c in clusters))
     a, sh = profile["overall"]["top_artists"][0]
@@ -263,7 +273,7 @@ def main():
     P.finish("fingerprint")
 
     o = profile["overall"]["traits"]
-    print(f"\n== Your overall fingerprint ({len(rows)} songs) ==")
+    print(f"\n== Your overall fingerprint ({rows_n} songs) ==")
     print(f"  tempo feel ~{o['tempo_feel']['p50']:.0f} BPM (most songs {o['tempo_feel']['p10']:.0f}-{o['tempo_feel']['p90']:.0f})")
     for f in ["energy", "danceability", "valence", "acousticness", "speechiness", "low_end_share"]:
         print(f"  {f}: {o[f]['mean']:.2f}  (range {o[f]['p10']:.2f}-{o[f]['p90']:.2f})")

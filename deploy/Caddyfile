@@ -1,0 +1,7 @@
+# HTTPS for the local network (docs/DEPLOYMENT.md). Caddy issues a certificate from its own local authority;
+# each device that uses the site must trust that authority once (caddy trust / install the root certificate).
+# Replace frequency.local with this Mac's name (System Settings → General → Sharing → Local hostname).
+frequency.local {
+	tls internal
+	reverse_proxy 127.0.0.1:8060
+}

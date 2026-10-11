@@ -90,3 +90,13 @@ describe("helpers", () => {
     expect(a.edges).toHaveLength(1);                  // links to genres outside the top 12 are dropped
   });
 });
+
+import { csrfToken } from "../services/api";
+
+describe("csrfToken", () => {
+  it("reads the readable CSRF cookie among others", () => {
+    expect(csrfToken("a=1; freq_csrf=abc%2Fdef; b=2")).toBe("abc/def");
+    expect(csrfToken("freq_csrf=xyz")).toBe("xyz");
+    expect(csrfToken("other=1")).toBe("");
+  });
+});

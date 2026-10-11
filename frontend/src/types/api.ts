@@ -63,7 +63,23 @@ export interface Progress {
   stages: Record<string, StageProgress>;
 }
 
-export interface PipelineStatus { progress: Progress; stages: Stage[]; running: boolean; ready: boolean }
+export interface PipelineStatus {
+  progress: Progress; stages: Stage[]; running: boolean; ready: boolean;
+  /** Multi-user server only: who is signed in, their listening sources, and whether they still need one. */
+  account?: { email: string; display_name: string | null };
+  sources?: Connections & { connected: Connection[] };
+  needs_source?: boolean;
+}
+
+export interface Connection { provider: "spotify" | "lastfm" | "history_upload"; account: string | null; status: string }
+export interface Connections {
+  connections?: Connection[];
+  available: { spotify: boolean; lastfm: boolean; history_upload: boolean; spotify_note?: string | null };
+}
+export interface SessionInfo {
+  user: { id: string; email: string; display_name: string | null; calibration_consent: boolean };
+  csrf_token: string;
+}
 
 /** What the desk sends: weights 0-100 as on the faders, ranges null when left wide open. */
 export interface DigSettings {
